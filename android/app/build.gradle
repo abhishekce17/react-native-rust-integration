@@ -105,6 +105,11 @@ android {
             proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
+    externalNativeBuild {
+    cmake {
+        path "src/main/jni/CMakeLists.txt"
+    }
+}
 }
 
 dependencies {
@@ -117,3 +122,33 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+def targetArchitectures = (project.findProperty("reactNativeArchitectures") ?: "arm64-v8a,x86_64").split(",")
+
+tasks.register("buildRust", Exec) {
+    description = "Compiles oxide-core static library via cargo-ndk"
+    workingDir file("${rootDir}/../oxide-core")
+
+    def cargoArgs = ["cargo", "ndk"]
+    targetArchitectures.each { arch ->
+        def trimmed = arch.trim()
+        if (!trimmed.isEmpty()) {
+            cargoArgs.addAll(["-t", trimmed])
+        }
+    }
+    // Builds target/<triple>/release/liboxide_core.a
+    cargoArgs.addAll(["build", "--release"])
+
+    if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
+        commandLine(["cmd", "/c"] + cargoArgs)
+    } else {
+        commandLine(cargoArgs)
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name.startsWith("configureCMake") || task.name.startsWith("externalNativeBuild")) {
+        task.dependsOn("buildRust")
+    }
+}
+preBuild.dependsOn("buildRust")

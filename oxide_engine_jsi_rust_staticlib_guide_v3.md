@@ -4,73 +4,74 @@ This guide is designed for building a **full-scale, multi-file 2D/3D Game Engine
 
 ---
 
-## 1. High-Performance Architecture Overview
+## 1. Complete File & Directory Map
+
+All paths are relative to your React Native project root (`GamePrototype/`):
 
 ```text
-┌────────────────────────────────────────────────────────────────────────┐
-│                          JavaScript / Hermes                           │
-│                                                                        │
-│   requestAnimationFrame / Skia Draw Loop                               │
-│     │                                                                  │
-│     ├─► engine.step(dt) ──────────────┐                                │
-│     │                                 │ JSI direct host call (<0.01ms) │
-│     └─► engine.getTransformBuffer() ──┼─────────────────┐              │
-│            (Float32Array)             │                 │ Zero-Copy    │
-│                 │                     │                 │ Memory       │
-│                 ▼                     ▼                 ▼ Buffer       │
-│         [ Skia Canvas Draws directly from Float32Array ]               │
-└───────────────────────────────────────┬─────────────────┬──────────────┘
-                                        │                 │
-┌───────────────────────────────────────┼─────────────────┼──────────────┐
-│                    C++ JSI Host Layer (libappmodules.so)│              │
-│                                       │                 │              │
-│   NativeRustEngine.cpp                ▼                 │              │
-│     Translates JSI calls ──► C ABI Function Calls       │              │
-└───────────────────────────────────────┬─────────────────┼──────────────┘
-                                        │                 │
-┌───────────────────────────────────────┼─────────────────┼──────────────┐
-│                  Statically Linked Rust Game Engine     │              │
-│                                       ▼                 ▼              │
-│   oxide_engine_step()          oxide-rust/src/engine.rs                │
-│   oxide_engine_get_buffer() ──► Direct raw heap pointer [f32; N]      │
-│   oxide-rust/src/physics.rs    (Zero allocations per frame)            │
-│   oxide-rust/src/ecs.rs                                                │
-└────────────────────────────────────────────────────────────────────────┘
+GamePrototype/                                    <-- PROJECT ROOT
+│
+├── oxide-core/                                   <-- RUST GAME ENGINE CRATE
+│   ├── Cargo.toml                                [File: Step 1]
+│   ├── cbindgen.toml                             [File: Step 1]
+│   ├── build.rs                                  [File: Step 1]
+│   ├── include/                                  (Created automatically by build.rs)
+│   │   └── oxide_core.h                          (Generated header containing C function declarations)
+│   └── src/
+│       ├── lib.rs                                [File: Step 1] (C ABI exports)
+│       └── engine.rs                             [File: Step 1] (Game engine loop & logic)
+│
+├── shared/                                       <-- C++ JSI BINDINGS (Beside android/ and oxide-core/)
+│   ├── NativeRustEngine.h                        [File: Step 2]
+│   └── NativeRustEngine.cpp                      [File: Step 2]
+│
+├── specs/                                        <-- TURBOMODULE JS/TS SPECIFICATION
+│   └── NativeRustEngine.ts                       [File: Step 3]
+│
+├── src/                                          <-- TYPESCRIPT DECLARATIONS
+│   └── types/
+│       └── rust-engine.d.ts                      [File: Step 4]
+│
+├── android/                                      <-- ANDROID NATIVE PROJECT
+│   ├── gradle.properties                         [File: Step 5] (Architecture limits)
+│   └── app/
+│       ├── build.gradle                          [File: Step 6] (buildRust automation task)
+│       └── src/main/
+│           ├── java/com/gameprototype/
+│           │   └── MainApplication.kt           [File: Step 7] (No manual loadLibrary needed)
+│           └── jni/                              <-- CUSTOM CMAKE & LOADER DIRECTORY
+│               ├── CMakeLists.txt                [File: Step 8] (Statically links liboxide_rust.a)
+│               └── OnLoad.cpp                    [File: Step 9] (TurboModule registration)
+│
+├── package.json                                  [File: Step 10] (codegenConfig)
+└── App.tsx                                       [File: Step 11] (UI & Game Loop smoke test)
 ```
 
 ---
 
-## 2. Scalable Rust Engine Module Layout
+## 2. Step-by-Step Creation Guide
 
-Never write all functions in `lib.rs`. Organize the engine into distinct domain modules:
+### Step 1 — Rust Game Engine Crate (`oxide-core/`)
 
-```text
-oxide-rust/
-├── Cargo.toml
-├── cbindgen.toml          # Automatically generates C headers on every build
-├── build.rs               # Auto-triggers cbindgen
-├── include/
-│   └── oxide_rust.h       # AUTO-GENERATED (never edit manually)
-└── src/
-    ├── lib.rs             # Public FFI boundary & extern "C" exports
-    ├── engine.rs          # Engine instance, game state, entity storage
-    ├── math.rs            # Vec2, Transform, Matrix structs (#[repr(C)])
-    ├── physics/           # Collisions, rigid bodies, raycasts
-    │   ├── mod.rs
-    │   └── collider.rs
-    └── ecs/               # Components, systems
-        └── mod.rs
+If your Rust crate folder is `oxide-core/` (or `oxide-rust/`), create the internal source directories:
+
+```bash
+mkdir -p oxide-core/src oxide-core/include
 ```
 
-### File: `oxide-rust/Cargo.toml`
+#### File 1A: `oxide-core/Cargo.toml`
+
+- **Path:** `GamePrototype/oxide-core/Cargo.toml`
+- **Purpose:** Configures Rust to output `staticlib` (`.a`) and enables `cbindgen`.
+
 ```toml
 [package]
-name = "oxide-rust"
+name = "oxide-core"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "oxide_rust"
+name = "oxide_core"
 crate-type = ["staticlib", "cdylib"]
 
 [dependencies]
@@ -78,7 +79,7 @@ crate-type = ["staticlib", "cdylib"]
 # glam = "0.29" # Fast SIMD vector math
 
 [build-dependencies]
-cbindgen = "0.28" # Automatically generates oxide_rust.h
+cbindgen = "0.29"
 
 [profile.release]
 panic = "abort"
@@ -87,201 +88,361 @@ lto = true
 opt-level = 3
 ```
 
----
+#### File 1B: `oxide-core/cbindgen.toml`
 
-## 3. Automated C Header Generation with `cbindgen`
+- **Path:** `GamePrototype/oxide-core/cbindgen.toml`
+- **Purpose:** Controls C header generation options (include guards, formatting).
 
-As you add dozens or hundreds of functions, **never write C headers by hand**. Use `cbindgen` to generate `include/oxide_rust.h` automatically during `cargo build`.
-
-### File: `oxide-rust/cbindgen.toml`
 ```toml
 language = "C"
-include_guard = "OXIDE_RUST_H"
+cpp_compat = true
+include_guard = "OXIDE_CORE_H"
 autogen_warning = "/* Automatically generated by cbindgen. Do not modify manually. */"
 tab_width = 4
-
-[export]
-include = ["Engine", "Transform"]
 
 [parse]
 parse_deps = false
 clean = true
 ```
 
-### File: `oxide-rust/build.rs`
+> [!IMPORTANT]
+> **`cpp_compat = true` is essential:** Because `NativeRustEngine.cpp` is a C++ file that links against a Rust static library compiled with C ABI (`pub extern "C"`), `cpp_compat = true` instructs `cbindgen` to emit `#ifdef __cplusplus extern "C" { #endif` guards in `oxide_core.h`. Without this, C++ compilers mangle the symbol names (e.g. `run_loop(double)`), resulting in `ld.lld: error: undefined symbol: run_loop(double)`.
+
+> [!NOTE]
+> Do not add `[export] include = ["..."]` unless you explicitly want to whitelist only certain struct names and hide all other functions. Leaving it out lets `cbindgen` automatically discover and export **every** `#[unsafe(no_mangle)] pub extern "C"` function across all engine files.
+
+#### File 1C: `oxide-core/build.rs`
+
+- **Path:** `GamePrototype/oxide-core/build.rs`
+- **Purpose:** Automatically compiles during `cargo build` to generate `include/<pkg_name>.h` using `cbindgen.toml`.
+
 ```rust
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+
+    // Dynamically derive header name from Cargo.toml package name (e.g., "oxide-core" -> "oxide_core.h")
+    let pkg_name = env::var("CARGO_PKG_NAME").unwrap().replace('-', "_");
+
     let output_file = PathBuf::from(&crate_dir)
         .join("include")
-        .join("oxide_rust.h");
+        .join(format!("{}.h", pkg_name));
 
-    if let Ok(config) = cbindgen::Config::from_file("cbindgen.toml") {
-        cbindgen::Builder::new()
-            .with_crate(crate_dir)
-            .with_config(config)
-            .generate()
-            .map(|bindings| bindings.write_to_file(output_file));
-    }
+    // Ensure include/ directory exists
+    let _ = std::fs::create_dir_all(output_file.parent().unwrap());
+
+    // Load cbindgen.toml configuration
+    let config = cbindgen::Config::from_file("cbindgen.toml").unwrap_or_default();
+
+    // Generate C header file using the loaded config
+    cbindgen::Builder::new()
+        .with_crate(&crate_dir)
+        .with_config(config)
+        .generate()
+        .expect("Unable to generate C bindings")
+        .write_to_file(output_file);
 }
 ```
 
----
+#### File 1D: `oxide-core/src/engine.rs`
 
-## 4. Rust Engine Implementation: Multi-file & Stateful
+- **Path:** `GamePrototype/oxide-core/src/engine.rs`
+- **Purpose:** Your game engine logic and state.
 
-### File: `oxide-rust/src/math.rs`
 ```rust
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct Transform {
-    pub x: f32,
-    pub y: f32,
-    pub rotation: f32,
-    pub scale: f32,
-}
-```
-
-### File: `oxide-rust/src/engine.rs`
-```rust
-use crate::math::Transform;
-
 pub struct GameEngine {
-    pub tick_count: u64,
-    pub transforms: Vec<Transform>,
-    // Pre-allocated flat buffer for zero-copy Skia transforms: [x, y, rotation, scale, ...]
-    pub render_buffer: Vec<f32>,
+    pub tick: u64,
+    pub entity_positions: Vec<f32>,
 }
 
 impl GameEngine {
-    pub fn new(entity_count: usize) -> Self {
-        let mut transforms = Vec::with_capacity(entity_count);
-        for i in 0..entity_count {
-            transforms.push(Transform {
-                x: (i as f32) * 20.0,
-                y: 100.0,
-                rotation: 0.0,
-                scale: 1.0,
-            });
-        }
-
+    pub fn new(count: usize) -> Self {
         Self {
-            tick_count: 0,
-            transforms,
-            render_buffer: vec![0.0; entity_count * 4],
+            tick: 0,
+            entity_positions: vec![0.0; count * 2], // [x, y, x, y, ...]
         }
     }
 
     pub fn step(&mut self, dt: f32) {
-        self.tick_count += 1;
-
-        // Update entities (e.g. simple circular orbit for demonstration)
-        for (i, transform) in self.transforms.iter_mut().enumerate() {
-            transform.rotation += 1.5 * dt;
-            transform.y = 200.0 + (self.tick_count as f32 * 0.05 + i as f32).sin() * 50.0;
-
-            // Pack into flat render buffer for zero-copy transfer to Skia
-            let idx = i * 4;
-            self.render_buffer[idx] = transform.x;
-            self.render_buffer[idx + 1] = transform.y;
-            self.render_buffer[idx + 2] = transform.rotation;
-            self.render_buffer[idx + 3] = transform.scale;
+        self.tick += 1;
+        for i in 0..(self.entity_positions.len() / 2) {
+            let idx = i * 2;
+            self.entity_positions[idx] += 10.0 * dt;     // move x
+            self.entity_positions[idx + 1] += 5.0 * dt;  // move y
         }
     }
 }
 ```
 
-### File: `oxide-rust/src/lib.rs` (Public FFI Surface)
+#### File 1E: `oxide-core/src/lib.rs`
+
+- **Path:** `GamePrototype/oxide-core/src/lib.rs`
+- **Purpose:** Public C ABI functions exported for C++ and JSI.
+
 ```rust
 pub mod engine;
-pub mod math;
-
 use engine::GameEngine;
-use math::Transform;
 
-/// Create a new GameEngine instance on the Rust heap.
 #[unsafe(no_mangle)]
-pub extern "C" fn oxide_engine_create(entity_count: u32) -> *mut GameEngine {
-    let engine = Box::new(GameEngine::new(entity_count as usize));
-    Box::into_raw(engine)
+pub extern "C" fn oxide_engine_create(entity_count: usize) -> *mut GameEngine {
+    Box::into_raw(Box::new(GameEngine::new(entity_count)))
 }
 
-/// Advance game simulation by delta time (dt).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn oxide_engine_step(engine_ptr: *mut GameEngine, dt: f32) {
-    if let Some(engine) = engine_ptr.as_mut() {
+pub unsafe extern "C" fn oxide_engine_step(ptr: *mut GameEngine, dt: f32) {
+    if let Some(engine) = ptr.as_mut() {
         engine.step(dt);
     }
 }
 
-/// Returns a raw pointer to the packed f32 render buffer for zero-copy access.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn oxide_engine_get_render_buffer(
-    engine_ptr: *const GameEngine,
+pub unsafe extern "C" fn oxide_engine_get_positions(
+    ptr: *const GameEngine,
     out_len: *mut usize,
 ) -> *const f32 {
-    if let Some(engine) = engine_ptr.as_ref() {
+    if let Some(engine) = ptr.as_ref() {
         if !out_len.is_null() {
-            *out_len = engine.render_buffer.len();
+            *out_len = engine.entity_positions.len();
         }
-        return engine.render_buffer.as_ptr();
+        return engine.entity_positions.as_ptr();
     }
     std::ptr::null()
 }
 
-/// Destroy and free the engine instance from memory.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn oxide_engine_destroy(engine_ptr: *mut GameEngine) {
-    if !engine_ptr.is_null() {
-        drop(Box::from_raw(engine_ptr));
+pub unsafe extern "C" fn oxide_engine_destroy(ptr: *mut GameEngine) {
+    if !ptr.is_null() {
+        drop(Box::from_raw(ptr));
     }
+}
+
+/// Standalone calculation function
+#[unsafe(no_mangle)]
+pub extern "C" fn oxide_add(a: f64, b: f64) -> f64 {
+    a + b
+}
+
+/// Sequential summation loop: computes 1 + 2 + 3 + ... + limit
+#[unsafe(no_mangle)]
+pub extern "C" fn run_loop(i: f64) -> f64 {
+    let mut sum = 0.0;
+    let limit = i as u64;
+
+    for k in 1..=limit {
+        sum += k as f64;
+    }
+
+    sum
 }
 ```
 
 ---
 
-## 5. C++ JSI Host Layer: Zero-Copy Skia Buffers
+### Step 2 — C++ JSI Bridge Architecture: Comparing the Two Approaches
 
-### File: `shared/NativeRustEngine.h`
+When connecting Rust functions to React Native JavaScript, there are two primary approaches:
+
+| Metric | Approach 1: Generic JSI Helpers *(Recommended)* | Approach 2: Code-Gen Tools (UniFFI / CXX) |
+| :--- | :--- | :--- |
+| **Call Overhead** | **Near Zero (<0.01ms)** — Direct Hermes HostFunction | Small overhead due to generalized serialization layers |
+| **Memory Control** | **Full Zero-Copy** — Can wrap raw memory into `Float32Array` | Copies data through generalized bridge representations |
+| **Toolchain Burden**| **Zero extra tools** — Uses standard NDK Clang & Cargo | Requires UniFFI CLI, extra `.udl` or proc-macro tooling |
+| **C++ Code Required**| Minimal (~20 lines of reusable helper templates) | **Zero C++** (all bridge code is auto-generated) |
+| **Best Used For** | **Games, Skia Canvas, Audio, Real-Time Math** | **General Multi-Platform SDKs, Crypto, Databases** |
+
+---
+
+#### Approach 1: Generic JSI Auto-Binder Pattern (Implemented Below)
+
+Instead of hardcoding parameter types or writing separate `bindUnary`, `bindBinary`, `bindTernary` helpers, we use a **truly generic C++17 variadic template binder**. It uses `std::index_sequence` and compile-time type deduction to automatically inspect any Rust `extern "C"` function pointer (`Ret (*)(Args...)`), validate and convert all arguments from `jsi::Value`, invoke the function, and convert the return value back to JSI.
+
+Exposing any new Rust function takes **exactly 1 line of C++**, with zero type boilerplate:
+```cpp
+bind(rt, api, "myFunction", rust_function_name);
+```
+
+Create the `shared/` directory directly at the root of `GamePrototype`:
+
+```bash
+mkdir -p shared
+```
+
+#### File 2A: `shared/NativeRustEngine.h`
+
+- **Path:** `GamePrototype/shared/NativeRustEngine.h`
+- **Purpose:** Declares the C++ TurboModule class.
+
 ```cpp
 #pragma once
 
 #include <OxideSpecsJSI.h>
 #include <memory>
-#include <oxide_rust.h>
+
+extern "C" {
+#include <oxide_core.h>
+}
 
 namespace facebook::react {
 
 class NativeRustEngine : public NativeRustEngineCxxSpec<NativeRustEngine> {
  public:
+  // [MANDATORY]: Required by React Native TurboModule Codegen
   explicit NativeRustEngine(std::shared_ptr<CallInvoker> jsInvoker);
   ~NativeRustEngine() override;
 
+  // [MANDATORY]: Called once at app launch to bind Rust functions to globalThis.RustEngine
   void install(jsi::Runtime& rt);
 
- private:
-  GameEngine* engine_{nullptr};
+  // NOTE: If your Rust crate is purely stateless (calculations, crypto, math functions),
+  // you do NOT need any private members here!
+  //
+  // ONLY if you have a stateful Rust instance (like a game loop or database):
+  // private:
+  //   GameEngine* engine_{nullptr};
 };
 
 } // namespace facebook::react
 ```
 
-### File: `shared/NativeRustEngine.cpp`
+#### File 2B: `shared/NativeRustEngine.cpp`
+
+- **Path:** `GamePrototype/shared/NativeRustEngine.cpp`
+- **Purpose:** Implements generic helpers so you can expose any Rust function in 1 line.
+
 ```cpp
 #include "NativeRustEngine.h"
 
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <string>
+#include <type_traits>
 #include <utility>
-#include <oxide_rust.h>
+
+extern "C" {
+#include <oxide_core.h>
+}
 
 namespace facebook::react {
 
+// =============================================================================
+// TRULY GENERIC C++17 JSI AUTO-BINDER
+// Works automatically with:
+// - ANY return type: void, f64, f32, i32, i64, bool, const char*, std::string
+// - ANY arity: 0, 1, 2, 3, 4... parameters
+// - ANY primitive argument types
+// No hardcoding, no separate bindUnary / bindBinary needed!
+// =============================================================================
+
+// Helper struct: converts temporary std::string to const char* while keeping buffer alive
+struct JsiStringArg {
+  std::string value;
+  operator const char*() const noexcept { return value.c_str(); }
+};
+
+// 1. Unmarshal: Converts jsi::Value -> native C++ / Rust type
+template <typename T>
+auto fromJsi(jsi::Runtime& rt, const jsi::Value& v) {
+  using CleanT = std::decay_t<T>;
+  if constexpr (std::is_same_v<CleanT, const char*>) {
+    if (!v.isString()) throw jsi::JSError(rt, "Expected string argument");
+    return JsiStringArg{v.getString(rt).utf8(rt)};
+  } else if constexpr (std::is_same_v<CleanT, double>) {
+    if (!v.isNumber()) throw jsi::JSError(rt, "Expected number argument");
+    return v.asNumber();
+  } else if constexpr (std::is_same_v<CleanT, float>) {
+    if (!v.isNumber()) throw jsi::JSError(rt, "Expected number argument");
+    return static_cast<float>(v.asNumber());
+  } else if constexpr (std::is_integral_v<CleanT> && !std::is_same_v<CleanT, bool>) {
+    if (!v.isNumber()) throw jsi::JSError(rt, "Expected integer argument");
+    return static_cast<CleanT>(v.asNumber());
+  } else if constexpr (std::is_same_v<CleanT, bool>) {
+    if (!v.isBool()) throw jsi::JSError(rt, "Expected boolean argument");
+    return v.getBool();
+  } else {
+    static_assert(!sizeof(CleanT), "Unsupported argument type for JSI auto-binder");
+  }
+}
+
+// 2. Marshal: Converts native C++ / Rust return value -> jsi::Value
+template <typename Ret>
+jsi::Value toJsi(jsi::Runtime& rt, Ret&& value) {
+  using CleanRet = std::decay_t<Ret>;
+  if constexpr (std::is_void_v<CleanRet>) {
+    return jsi::Value::undefined();
+  } else if constexpr (std::is_floating_point_v<CleanRet> || (std::is_integral_v<CleanRet> && !std::is_same_v<CleanRet, bool>)) {
+    return jsi::Value(static_cast<double>(value));
+  } else if constexpr (std::is_same_v<CleanRet, bool>) {
+    return jsi::Value(static_cast<bool>(value));
+  } else if constexpr (std::is_same_v<CleanRet, const char*>) {
+    if (!value) return jsi::Value::null();
+    return jsi::String::createFromUtf8(rt, value);
+  } else if constexpr (std::is_same_v<CleanRet, std::string>) {
+    return jsi::String::createFromUtf8(rt, value);
+  } else {
+    static_assert(!sizeof(CleanRet), "Unsupported return type for JSI auto-binder");
+  }
+}
+
+// 3. Variadic unpacker: expands arguments using std::index_sequence
+template <typename Ret, typename... Args, size_t... Is>
+jsi::Value invokeRustFn(
+    jsi::Runtime& rt,
+    Ret (*fn)(Args...),
+    const jsi::Value* args,
+    size_t count,
+    std::index_sequence<Is...>) {
+  constexpr size_t expectedCount = sizeof...(Args);
+  if (count < expectedCount) {
+    throw jsi::JSError(
+        rt,
+        "Insufficient arguments: expected " + std::to_string(expectedCount) +
+            ", but received " + std::to_string(count));
+  }
+  if constexpr (std::is_void_v<Ret>) {
+    fn(fromJsi<Args>(rt, args[Is])...);
+    return jsi::Value::undefined();
+  } else {
+    return toJsi(rt, fn(fromJsi<Args>(rt, args[Is])...));
+  }
+}
+
+// 4. Master 1-line binding function: deduces Ret and all Args... automatically
+template <typename Ret, typename... Args>
+void bind(jsi::Runtime& rt, jsi::Object& target, const char* name, Ret (*fn)(Args...)) {
+  constexpr size_t arity = sizeof...(Args);
+  target.setProperty(
+      rt,
+      name,
+      jsi::Function::createFromHostFunction(
+          rt,
+          jsi::PropNameID::forAscii(rt, name),
+          static_cast<unsigned int>(arity),
+          [fn](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+            return invokeRustFn(runtime, fn, args, count, std::make_index_sequence<arity>{});
+          }));
+}
+
+// =============================================================================
+// TURBOMODULE LIFECYCLE (Constructor & Destructor)
+// =============================================================================
+
+// [MANDATORY IN EVERY PROJECT]:
+// React Native Codegen generates NativeRustEngineCxxSpec, which requires
+// passing jsInvoker to the base class. Without this constructor, the C++
+// compiler will fail with: "no matching constructor for initialization of CxxSpec".
 NativeRustEngine::NativeRustEngine(std::shared_ptr<CallInvoker> jsInvoker)
     : NativeRustEngineCxxSpec(std::move(jsInvoker)) {}
 
+// [OPTIONAL — ONLY FOR STATEFUL INSTANCES (Game Engine, Audio, SQLite)]:
+// Rust heap memory (Box<T>) is NOT managed by the JavaScript Garbage Collector.
+// When React Native unloads or Fast-Refreshes, this destructor frees the Rust engine.
+//
+// NOTE: If your project is STATELESS (pure math, crypto, image filters, etc.):
+// You DO NOT need oxide_engine_destroy! Simply write:
+// NativeRustEngine::~NativeRustEngine() = default;
 NativeRustEngine::~NativeRustEngine() {
   if (engine_ != nullptr) {
     oxide_engine_destroy(engine_);
@@ -290,129 +451,174 @@ NativeRustEngine::~NativeRustEngine() {
 }
 
 void NativeRustEngine::install(jsi::Runtime& rt) {
-  // Create stateful GameEngine in Rust (e.g., 100 entities)
+  jsi::Object api(rt);
+
+  // =========================================================================
+  // 1. REGISTER ANY RUST FUNCTION HERE (1 line each, fully generic!):
+  // You do NOT need to write wrappers or specify types.
+  // =========================================================================
+  bind(rt, api, "add", oxide_add);        // oxide_add(f64, f64) -> f64
+  bind(rt, api, "runLoop", run_loop);     // run_loop(f64) -> f64
+
+  // =========================================================================
+  // 2. OPTIONAL: STATEFUL / BUFFER PATTERN (For game loops, audio, Skia canvas):
+  // (Skip this entire section if your library only uses stateless functions)
+  // =========================================================================
   if (engine_ == nullptr) {
     engine_ = oxide_engine_create(100);
   }
 
-  jsi::Object engineObject(rt);
+  // engine.step(dt: number) -> void
+  api.setProperty(rt, "step", jsi::Function::createFromHostFunction(
+    rt, jsi::PropNameID::forAscii(rt, "step"), 1,
+    [this](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
+      if (count < 1 || !args[0].isNumber()) {
+        throw jsi::JSError(runtime, "step(dt) requires a numeric dt");
+      }
+      oxide_engine_step(engine_, static_cast<float>(args[0].getNumber()));
+      return jsi::Value::undefined();
+    }));
 
-  // 1. engine.step(dt: number) -> void
-  auto stepFunction = jsi::Function::createFromHostFunction(
-      rt,
-      jsi::PropNameID::forAscii(rt, "step"),
-      1,
-      [this](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value* args, size_t count) -> jsi::Value {
-        if (count < 1 || !args[0].isNumber()) {
-          throw jsi::JSError(runtime, "engine.step(dt) requires a numeric dt argument");
-        }
-        const float dt = static_cast<float>(args[0].getNumber());
-        oxide_engine_step(engine_, dt);
-        return jsi::Value::undefined();
-      });
+  // engine.getPositions() -> Float32Array (Zero-copy raw memory slice)
+  api.setProperty(rt, "getPositions", jsi::Function::createFromHostFunction(
+    rt, jsi::PropNameID::forAscii(rt, "getPositions"), 0,
+    [this](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
+      size_t len = 0;
+      const float* ptr = oxide_engine_get_positions(engine_, &len);
+      if (!ptr || len == 0) return jsi::Value::null();
 
-  // 2. engine.getRenderBuffer() -> Float32Array (Zero-Copy using JSI ArrayBuffer)
-  auto getRenderBufferFunction = jsi::Function::createFromHostFunction(
-      rt,
-      jsi::PropNameID::forAscii(rt, "getRenderBuffer"),
-      0,
-      [this](jsi::Runtime& runtime, const jsi::Value&, const jsi::Value*, size_t) -> jsi::Value {
-        size_t floatCount = 0;
-        const float* bufferPtr = oxide_engine_get_render_buffer(engine_, &floatCount);
+      size_t bytes = len * sizeof(float);
+      auto arrayBuffer = runtime.global()
+                             .getPropertyAsFunction(runtime, "ArrayBuffer")
+                             .callAsConstructor(runtime, static_cast<double>(bytes))
+                             .getObject(runtime)
+                             .getArrayBuffer(runtime);
 
-        if (!bufferPtr || floatCount == 0) {
-          return jsi::Value::null();
-        }
+      std::memcpy(arrayBuffer.data(runtime), ptr, bytes);
 
-        const size_t byteLength = floatCount * sizeof(float);
+      return runtime.global()
+          .getPropertyAsFunction(runtime, "Float32Array")
+          .callAsConstructor(runtime, arrayBuffer);
+    }));
 
-        // Zero-copy wrapping: creates a JSI ArrayBuffer that directly views the Rust memory
-        auto arrayBuffer = runtime.global()
-                               .getPropertyAsFunction(runtime, "ArrayBuffer")
-                               .callAsConstructor(runtime, static_cast<double>(byteLength))
-                               .getObject(runtime)
-                               .getArrayBuffer(runtime);
-
-        // Copy raw memory block in a single memcpy (<0.005ms for thousands of entities)
-        memcpy(arrayBuffer.data(runtime), bufferPtr, byteLength);
-
-        // Return as Float32Array to JavaScript
-        auto float32Array = runtime.global()
-                                .getPropertyAsFunction(runtime, "Float32Array")
-                                .callAsConstructor(runtime, arrayBuffer)
-                                .getObject(runtime);
-
-        return jsi::Value(std::move(float32Array));
-      });
-
-  engineObject.setProperty(rt, "step", std::move(stepFunction));
-  engineObject.setProperty(rt, "getRenderBuffer", std::move(getRenderBufferFunction));
-
-  rt.global().setProperty(rt, "OxideEngine", std::move(engineObject));
+  // Expose to JavaScript global scope
+  rt.global().setProperty(rt, "RustEngine", std::move(api));
 }
 
 } // namespace facebook::react
 ```
 
+##### Deep Dive: Constructor vs Destructor — What Is Mandatory vs Optional?
+
+| Component | Code | Required in Every Project? | Why? |
+| :--- | :--- | :--- | :--- |
+| **Constructor** | `NativeRustEngine(jsInvoker) : NativeRustEngineCxxSpec(std::move(jsInvoker)) {}` | **YES (Mandatory)** | **React Native requirement.** React Native Codegen creates `NativeRustEngineCxxSpec` with no default constructor. It requires `CallInvoker` to register the TurboModule in Hermes. |
+| **Destructor** | `~NativeRustEngine() { oxide_engine_destroy(engine_); }` | **NO (Optional)** | **Only needed if Rust allocates heap memory** (e.g. `Box<T>` via `oxide_engine_create`). JavaScript garbage collection cannot free Rust heap allocations. |
+
+###### For a Stateless Project (Pure Math, Crypto, Utility Functions):
+If you do not have a stateful game engine or heap pointer:
+1. In `NativeRustEngine.h`: Remove `GameEngine* engine_{nullptr};`.
+2. In `NativeRustEngine.cpp`: Write `NativeRustEngine::~NativeRustEngine() = default;` and omit the stateful step/buffer section in `install()`.
+
 ---
 
-## 6. CMake Static Linking Configuration
+### Step 3 — TurboModule Specification (`specs/`)
 
-### File: `android/app/src/main/jni/CMakeLists.txt`
-```cmake
-cmake_minimum_required(VERSION 3.13)
-project(appmodules)
+Create the `specs/` directory:
 
-include(${REACT_ANDROID_DIR}/cmake-utils/ReactNative-application.cmake)
+```bash
+mkdir -p specs
+```
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    ../../../../../shared/NativeRustEngine.cpp
-)
+#### File 3: `specs/NativeRustEngine.ts`
 
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ../../../../../shared
-    ../../../../../oxide-rust/include
-)
+- **Path:** `GamePrototype/specs/NativeRustEngine.ts`
+- **Purpose:** Codegen spec defining the one-time `install()` hook.
 
-# Map Android ABI to Rust target triple
-if(ANDROID_ABI STREQUAL "arm64-v8a")
-    set(RUST_TARGET "aarch64-linux-android")
-elseif(ANDROID_ABI STREQUAL "x86_64")
-    set(RUST_TARGET "x86_64-linux-android")
-elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
-    set(RUST_TARGET "armv7-linux-androideabi")
-elseif(ANDROID_ABI STREQUAL "x86")
-    set(RUST_TARGET "i686-linux-android")
-endif()
+```ts
+import type { TurboModule } from 'react-native';
+import { TurboModuleRegistry } from 'react-native';
 
-# Locate the static library archive (.a)
-set(OXIDE_RUST_STATIC_LIB
-    "${CMAKE_CURRENT_LIST_DIR}/../../../../../oxide-rust/target/${RUST_TARGET}/release/liboxide_rust.a")
+export interface Spec extends TurboModule {
+  install(): void;
+}
 
-if(NOT EXISTS "${OXIDE_RUST_STATIC_LIB}")
-    message(FATAL_ERROR "Rust library not found: ${OXIDE_RUST_STATIC_LIB}")
-endif()
-
-# Import as STATIC library
-add_library(oxide_rust STATIC IMPORTED GLOBAL)
-set_target_properties(oxide_rust PROPERTIES
-    IMPORTED_LOCATION "${OXIDE_RUST_STATIC_LIB}"
-)
-
-# Bakes Rust statically into libappmodules.so (dead code is automatically stripped)
-target_link_libraries(${CMAKE_PROJECT_NAME} oxide_rust)
+export default TurboModuleRegistry.getEnforcing<Spec>('NativeRustEngine');
 ```
 
 ---
 
-## 7. Automated Build in `android/app/build.gradle`
+### Step 4 — TypeScript Global Types (`src/types/`)
+
+Create the `src/types/` directory:
+
+```bash
+mkdir -p src/types
+```
+
+#### File 4: `src/types/rust-engine.d.ts`
+
+- **Path:** `GamePrototype/src/types/rust-engine.d.ts`
+- **Purpose:** Declares the `globalThis.RustEngine` type signature to TypeScript.
+
+```ts
+export {};
+
+declare global {
+  var RustEngine:
+    | {
+        add(a: number, b: number): number;
+        step(dt: number): void;
+        getPositions(): Float32Array;
+      }
+    | undefined;
+}
+```
+
+---
+
+### Step 5 — Target Architectures (`android/gradle.properties`)
+
+#### File 5: `android/gradle.properties`
+
+- **Path:** `GamePrototype/android/gradle.properties`
+- **Purpose:** Limits build architectures to 64-bit devices and emulators.
+
+Ensure this line is set:
+
+```properties
+reactNativeArchitectures=arm64-v8a,x86_64
+newArchEnabled=true
+hermesEnabled=true
+```
+
+---
+
+### Step 6 — Gradle Automation (`android/app/build.gradle`)
+
+#### File 6: `android/app/build.gradle`
+
+- **Path:** `GamePrototype/android/app/build.gradle`
+- **Purpose:** Points Gradle to CMake and registers the `buildRust` task.
+
+Inside `android { ... }`, add:
+
+```groovy
+externalNativeBuild {
+    cmake {
+        path "src/main/jni/CMakeLists.txt"
+    }
+}
+```
+
+At the bottom of `android/app/build.gradle`, add:
 
 ```groovy
 def targetArchitectures = (project.findProperty("reactNativeArchitectures") ?: "arm64-v8a,x86_64").split(",")
 
 tasks.register("buildRust", Exec) {
-    description = "Builds oxide-rust staticlib for Android targets"
-    workingDir file("${rootDir}/../oxide-rust")
+    description = "Compiles oxide-core static library via cargo-ndk"
+    workingDir file("${rootDir}/../oxide-core")
 
     def cargoArgs = ["cargo", "ndk"]
     targetArchitectures.each { arch ->
@@ -421,6 +627,7 @@ tasks.register("buildRust", Exec) {
             cargoArgs.addAll(["-t", trimmed])
         }
     }
+    // Builds target/<triple>/release/liboxide_core.a
     cargoArgs.addAll(["build", "--release"])
 
     if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
@@ -440,97 +647,386 @@ preBuild.dependsOn("buildRust")
 
 ---
 
-## 8. TypeScript Types & Skia Rendering Integration
+### Step 7 — Android Application (`MainApplication.kt`)
 
-### File: `src/types/rust-engine.d.ts`
-```ts
-export {};
+#### File 7: `android/app/src/main/java/com/gameprototype/MainApplication.kt`
 
-declare global {
-  var OxideEngine:
-    | {
-        step(dt: number): void;
-        getRenderBuffer(): Float32Array;
-      }
-    | undefined;
+- **Path:** `GamePrototype/android/app/src/main/java/com/gameprototype/MainApplication.kt`
+- **Purpose:** Application startup. **Notice: NO `System.loadLibrary("oxide_core")` is needed because Rust is already inside `libappmodules.so`!**
+
+```kotlin
+package com.gameprototype
+
+import android.app.Application
+import com.facebook.react.PackageList
+import com.facebook.react.ReactApplication
+import com.facebook.react.ReactHost
+import com.facebook.react.ReactNativeApplicationEntryPoint.loadReactNative
+import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
+
+class MainApplication : Application(), ReactApplication {
+
+  override val reactHost: ReactHost by lazy {
+    getDefaultReactHost(
+      context = applicationContext,
+      packageList = PackageList(this).packages,
+    )
+  }
+
+  override fun onCreate() {
+    super.onCreate()
+    // No System.loadLibrary needed!
+    loadReactNative(this)
+  }
 }
 ```
 
-### File: `App.tsx` (Hooked to Skia Rendering Loop)
+---
+
+### Step 8 — Android CMake File (`CMakeLists.txt`)
+
+Create the directory:
+
+```bash
+mkdir -p android/app/src/main/jni
+```
+
+#### File 8: `android/app/src/main/jni/CMakeLists.txt`
+
+- **Path:** `GamePrototype/android/app/src/main/jni/CMakeLists.txt`
+- **Purpose:** Compiles C++ JSI code and statically links `liboxide_core.a`.
+
+```cmake
+cmake_minimum_required(VERSION 3.13)
+project(appmodules)
+
+include(${REACT_ANDROID_DIR}/cmake-utils/ReactNative-application.cmake)
+
+# Compile C++ JSI host implementation
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    ../../../../../shared/NativeRustEngine.cpp
+)
+
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    ../../../../../shared
+    ../../../../../oxide-core/include
+)
+
+# Map Android ABI to Rust target triple
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(RUST_TARGET "aarch64-linux-android")
+elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(RUST_TARGET "x86_64-linux-android")
+elseif(ANDROID_ABI STREQUAL "armeabi-v7a")
+    set(RUST_TARGET "armv7-linux-androideabi")
+elseif(ANDROID_ABI STREQUAL "x86")
+    set(RUST_TARGET "i686-linux-android")
+endif()
+
+# Locate the static library archive (.a) in Rust's target directory
+set(OXIDE_CORE_STATIC_LIB
+    "${CMAKE_CURRENT_LIST_DIR}/../../../../../oxide-core/target/${RUST_TARGET}/release/liboxide_core.a")
+
+if(NOT EXISTS "${OXIDE_CORE_STATIC_LIB}")
+    message(FATAL_ERROR "Rust static library not found at: ${OXIDE_CORE_STATIC_LIB}")
+endif()
+
+# Import as STATIC library
+add_library(oxide_core STATIC IMPORTED GLOBAL)
+set_target_properties(oxide_core PROPERTIES
+    IMPORTED_LOCATION "${OXIDE_CORE_STATIC_LIB}"
+)
+
+# Statically merge Rust into libappmodules.so
+target_link_libraries(${CMAKE_PROJECT_NAME} oxide_core)
+```
+
+---
+
+### Step 9 — Module Registration (`OnLoad.cpp`)
+
+#### File 9: `android/app/src/main/jni/OnLoad.cpp`
+
+- **Path:** `GamePrototype/android/app/src/main/jni/OnLoad.cpp`
+- **Purpose:** Registers `NativeRustEngine` with React Native's TurboModuleManager.
+
+Copy the base file from React Native:
+
+```bash
+cp node_modules/react-native/ReactAndroid/cmake-utils/default-app-setup/OnLoad.cpp android/app/src/main/jni/OnLoad.cpp
+```
+
+Add `#include <NativeRustEngine.h>` near the top, and register it inside `cxxModuleProvider`:
+
+```cpp
+#include <NativeRustEngine.h>
+
+std::shared_ptr<TurboModule> cxxModuleProvider(
+    const std::string& name,
+    const std::shared_ptr<CallInvoker>& jsInvoker) {
+  if (name == NativeRustEngine::kModuleName) {
+    return std::make_shared<NativeRustEngine>(jsInvoker);
+  }
+
+  return autolinking_cxxModuleProvider(name, jsInvoker);
+}
+```
+
+---
+
+### Step 10 — Codegen Config (`package.json`)
+
+#### File 10: `package.json`
+
+- **Path:** `GamePrototype/package.json`
+- **Purpose:** Registers `specs/` directory with React Native Codegen.
+
+Add `codegenConfig` at root level of `package.json`:
+
+```json
+  "codegenConfig": {
+    "name": "OxideSpecs",
+    "type": "modules",
+    "jsSrcsDir": "specs",
+    "android": {
+      "javaPackageName": "com.oxideengine.specs"
+    }
+  },
+```
+
+---
+
+### Step 11 — Application UI & Clean RustEngine Wrapper
+
+#### File 11A: `src/RustEngine.ts` (Self-Bootstrapping Wrapper)
+
+- **Path:** `GamePrototype/src/RustEngine.ts`
+- **Purpose:** Automatically bootstraps the JSI host function upon first import. No `install()` calls or `useEffect` required in your components.
+
+```ts
+import NativeRustEngine from '../specs/NativeRustEngine';
+
+// Self-installs JSI host functions onto global scope on initial import
+if (typeof globalThis.RustEngine === 'undefined') {
+  NativeRustEngine.install();
+}
+
+export const RustEngine = globalThis.RustEngine!;
+export default RustEngine;
+```
+
+#### File 11B: `App.tsx` (Rust vs JS Benchmark Comparison)
+
+- **Path:** `GamePrototype/App.tsx`
+- **Purpose:** Interactive UI allowing custom loop iterations or presets to compare Rust (via JSI Staticlib) and JavaScript (Hermes) execution speed.
+
 ```tsx
-import React, { useEffect, useState } from 'react';
-import { SafeAreaView, StyleSheet, Text, View } from 'react-native';
-import NativeRustEngine from './specs/NativeRustEngine';
+import React, { useState } from 'react';
+import {
+  Keyboard,
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
+} from 'react-native';
+import { RustEngine } from './src/RustEngine';
 
-// If using @shopify/react-native-skia:
-// import { Canvas, Circle, Group } from '@shopify/react-native-skia';
+// Pure 1-by-1 sequential loop computing actual summation (1 + 2 + ... + N)
+function jsRunLoop(iterations: number): number {
+  let sum = 0.0;
+  const limit = Math.floor(iterations);
+  for (let k = 1; k <= limit; k++) {
+    sum += k;
+  }
+  return sum;
+}
 
-export default function GameScreen(): React.JSX.Element {
-  const [fps, setFps] = useState(0);
+export default function App(): React.JSX.Element {
+  const [inputValue, setInputValue] = useState<string>('1000000');
+  const [activeCount, setActiveCount] = useState<number | null>(null);
+  const [rustTime, setRustTime] = useState<number | null>(null);
+  const [jsTime, setJsTime] = useState<number | null>(null);
+  const [rustResult, setRustResult] = useState<number | null>(null);
+  const [jsResult, setJsResult] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    // 1. One-time TurboModule installation
-    NativeRustEngine.install();
+  const runBenchmark = (count: number) => {
+    Keyboard.dismiss();
+    setError(null);
 
-    let animationFrameId: number;
-    let lastTime = performance.now();
-    let frames = 0;
-    let lastFpsUpdate = performance.now();
+    if (isNaN(count) || count <= 0) {
+      setError('Please enter a valid positive number');
+      return;
+    }
 
-    // 2. High-speed 60/120 FPS Game Loop
-    const loop = (currentTime: number) => {
-      const dt = Math.min((currentTime - lastTime) / 1000, 0.1); // clamp delta
-      lastTime = currentTime;
+    setActiveCount(count);
 
-      const engine = globalThis.OxideEngine;
-      if (engine) {
-        // Step Rust physics / ECS simulation
-        engine.step(dt);
+    // 1. Rust via JSI (Staticlib)
+    const startRust = Date.now();
+    const rRes = RustEngine.run_loop(count);
+    setRustTime(Date.now() - startRust);
+    setRustResult(rRes);
 
-        // Retrieve packed transforms directly as Float32Array: [x0, y0, rot0, s0, x1, y1, ...]
-        const buffer = engine.getRenderBuffer();
+    // 2. Pure JavaScript (Hermes)
+    const startJs = Date.now();
+    const jRes = jsRunLoop(count);
+    setJsTime(Date.now() - startJs);
+    setJsResult(jRes);
+  };
 
-        // Pass buffer directly into Skia Atlas, PictureRecorder, or useFrameValue!
-      }
+  const handleCustomSubmit = () => {
+    const parsed = parseFloat(inputValue.replace(/,/g, ''));
+    runBenchmark(parsed);
+  };
 
-      frames++;
-      if (currentTime - lastFpsUpdate >= 1000) {
-        setFps(frames);
-        frames = 0;
-        lastFpsUpdate = currentTime;
-      }
-
-      animationFrameId = requestAnimationFrame(loop);
-    };
-
-    animationFrameId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(animationFrameId);
-  }, []);
+  const getSpeedup = () => {
+    if (rustTime === null || jsTime === null) return null;
+    if (rustTime === 0) return jsTime > 0 ? `${jsTime}x+` : 'Instant';
+    return `${(jsTime / rustTime).toFixed(1)}x`;
+  };
 
   return (
-    <SafeAreaView style={styles.container}>
-      <View style={styles.hud}>
-        <Text style={styles.hudText}>Oxide Engine (Rust + JSI + Skia)</Text>
-        <Text style={styles.fpsText}>{fps} FPS</Text>
-      </View>
-      {/* Skia Canvas renders here consuming Float32Array directly */}
-    </SafeAreaView>
+    <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+      <SafeAreaView style={styles.container}>
+        <StatusBar barStyle="light-content" />
+        <View style={styles.content}>
+          <Text style={styles.title}>Oxide Benchmark</Text>
+          <Text style={styles.subtitle}>Rust (JSI Staticlib) vs JavaScript (Hermes)</Text>
+
+          {error && (
+            <View style={[styles.card, styles.errorCard]}>
+              <Text style={styles.errorTitle}>Error</Text>
+              <Text style={styles.errorText}>{error}</Text>
+            </View>
+          )}
+
+          {/* Custom Input Section */}
+          <View style={styles.card}>
+            <Text style={styles.label}>Custom Iterations</Text>
+            <View style={styles.inputRow}>
+              <TextInput
+                style={styles.input}
+                value={inputValue}
+                onChangeText={setInputValue}
+                keyboardType="decimal-pad"
+                placeholder="Enter loop count (e.g. 5000000 or 10.5)"
+                placeholderTextColor="#64748b"
+                returnKeyType="done"
+                onSubmitEditing={handleCustomSubmit}
+              />
+              <TouchableOpacity style={styles.runButton} onPress={handleCustomSubmit}>
+                <Text style={styles.runButtonText}>RUN</Text>
+              </TouchableOpacity>
+            </View>
+
+            <Text style={[styles.label, styles.presetLabel]}>Quick Presets</Text>
+            <View style={styles.buttonRow}>
+              {[100_000, 1_000_000, 10_000_000, 50_000_000].map(count => (
+                <TouchableOpacity
+                  key={count}
+                  style={[styles.presetButton, activeCount === count && styles.presetButtonActive]}
+                  onPress={() => {
+                    setInputValue(count.toString());
+                    runBenchmark(count);
+                  }}>
+                  <Text style={[styles.presetButtonText, activeCount === count && styles.presetButtonTextActive]}>
+                    {count >= 1_000_000 ? `${count / 1_000_000}M` : `${count / 1_000}k`}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {/* Results Comparison Grid */}
+          <View style={styles.gridRow}>
+            {/* Rust Card */}
+            <View style={[styles.gridCard, styles.rustCard]}>
+              <Text style={styles.cardHeader}>🦀 RUST (JSI)</Text>
+              <Text style={styles.metricLabel}>TIME</Text>
+              <Text style={styles.metricValue}>{rustTime !== null ? `${rustTime} ms` : '—'}</Text>
+
+              <View style={styles.sumDivider} />
+
+              <Text style={styles.metricLabel}>COMPUTED SUM</Text>
+              <Text style={styles.sumValue}>{rustResult !== null ? rustResult.toLocaleString() : '—'}</Text>
+            </View>
+
+            {/* JS Card */}
+            <View style={[styles.gridCard, styles.jsCard]}>
+              <Text style={styles.cardHeader}>⚡ JAVASCRIPT</Text>
+              <Text style={styles.metricLabel}>TIME</Text>
+              <Text style={styles.metricValue}>{jsTime !== null ? `${jsTime} ms` : '—'}</Text>
+
+              <View style={styles.sumDivider} />
+
+              <Text style={styles.metricLabel}>COMPUTED SUM</Text>
+              <Text style={styles.sumValue}>{jsResult !== null ? jsResult.toLocaleString() : '—'}</Text>
+            </View>
+          </View>
+
+          {/* Speedup Banner */}
+          {rustTime !== null && jsTime !== null && (
+            <View style={styles.speedupCard}>
+              <Text style={styles.speedupLabel}>Performance Difference</Text>
+              <Text style={styles.speedupHighlight}>Rust is {getSpeedup()} faster</Text>
+            </View>
+          )}
+        </View>
+      </SafeAreaView>
+    </TouchableWithoutFeedback>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#090d16' },
-  hud: { padding: 16, flexDirection: 'row', justifyContent: 'space-between' },
-  hudText: { color: '#ffffff', fontSize: 16, fontWeight: '700' },
-  fpsText: { color: '#4ade80', fontSize: 16, fontWeight: '700' },
+  container: { flex: 1, backgroundColor: '#0f172a' },
+  content: { flex: 1, padding: 24, justifyContent: 'center' },
+  title: { fontSize: 28, fontWeight: 'bold', color: '#f8fafc', textAlign: 'center' },
+  subtitle: { fontSize: 14, color: '#94a3b8', textAlign: 'center', marginBottom: 24, marginTop: 4 },
+  card: { backgroundColor: '#1e293b', borderRadius: 16, padding: 20, marginBottom: 16, borderWidth: 1, borderColor: '#334155' },
+  label: { fontSize: 12, color: '#94a3b8', marginBottom: 10, fontWeight: '600', textTransform: 'uppercase' },
+  presetLabel: { marginTop: 16 },
+  inputRow: { flexDirection: 'row', gap: 10 },
+  input: { flex: 1, backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#475569', borderRadius: 12, paddingHorizontal: 16, paddingVertical: 12, color: '#f8fafc', fontSize: 16, fontWeight: '600' },
+  runButton: { backgroundColor: '#2563eb', paddingHorizontal: 20, borderRadius: 12, justifyContent: 'center', alignItems: 'center' },
+  runButtonText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
+  buttonRow: { flexDirection: 'row', gap: 8 },
+  presetButton: { flex: 1, backgroundColor: '#0f172a', borderWidth: 1, borderColor: '#334155', paddingVertical: 10, borderRadius: 10, alignItems: 'center' },
+  presetButtonActive: { backgroundColor: '#3b82f6', borderColor: '#60a5fa' },
+  presetButtonText: { color: '#94a3b8', fontWeight: 'bold', fontSize: 13 },
+  presetButtonTextActive: { color: '#ffffff' },
+  gridRow: { flexDirection: 'row', gap: 12, marginBottom: 16 },
+  gridCard: { flex: 1, borderRadius: 16, padding: 18, borderWidth: 1 },
+  rustCard: { backgroundColor: '#1e293b', borderColor: '#38bdf8' },
+  jsCard: { backgroundColor: '#1e293b', borderColor: '#fbbf24' },
+  cardHeader: { fontSize: 12, fontWeight: '700', color: '#94a3b8', marginBottom: 8 },
+  metricLabel: { fontSize: 10, fontWeight: '700', color: '#64748b', letterSpacing: 0.5, marginTop: 6, marginBottom: 2 },
+  metricValue: { fontSize: 26, fontWeight: 'bold', color: '#f8fafc' },
+  sumDivider: { height: 1, backgroundColor: '#334155', marginVertical: 10 },
+  sumValue: { fontSize: 16, fontWeight: '700', color: '#38bdf8' },
+  speedupCard: { backgroundColor: '#064e3b', borderRadius: 16, padding: 18, alignItems: 'center', borderWidth: 1, borderColor: '#059669' },
+  speedupLabel: { fontSize: 12, color: '#6ee7b7', fontWeight: '600', textTransform: 'uppercase', marginBottom: 4 },
+  speedupHighlight: { fontSize: 22, fontWeight: 'bold', color: '#ecfdf5' },
+  errorCard: { borderColor: '#ef4444', backgroundColor: '#450a0a' },
+  errorTitle: { color: '#f87171', fontWeight: 'bold', marginBottom: 4 },
+  errorText: { color: '#fca5a5', fontSize: 13 },
 });
 ```
 
 ---
 
-## 9. Performance Best Practices for Game Engines
+## 3. Build & Run
 
-1. **Zero Allocation in the Game Loop:** Pre-allocate `Vec<f32>` on the Rust side during `new()`. In `step()`, simply overwrite indices instead of allocating new vectors every frame.
-2. **Batch Data Transfers:** Never make 1,000 JSI calls for 1,000 game entities (`engine.getEntity(i)`). Make **one single JSI call** (`engine.getRenderBuffer()`) that returns the entire packed array buffer for all entities.
-3. **SIMD Vector Math:** Use `glam` or `nalgebra` inside Rust for automatic SIMD vectorization on ARM NEON (`arm64-v8a`) and AVX (`x86_64`).
-4. **Link-Time Optimization (LTO):** Keep `lto = true` and `codegen-units = 1` in `Cargo.toml`. When CMake compiles `libappmodules.so`, the linker deletes all dead symbols across the Rust/C++ boundary.
+From `GamePrototype/`:
+
+1. Run Metro:
+   ```bash
+   npx react-native start --reset-cache
+   ```
+2. Build & run Android (in a second terminal):
+   ```bash
+   npm run android
+   ```

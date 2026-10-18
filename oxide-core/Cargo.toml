@@ -1,0 +1,17 @@
+[package]
+name = "oxide-core"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "oxide_core"
+crate-type = ["staticlib", "cdylib"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
+
+[build-dependencies]
+cbindgen = "0.29.4"
