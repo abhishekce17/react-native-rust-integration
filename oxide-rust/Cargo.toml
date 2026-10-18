@@ -1,0 +1,14 @@
+[package]
+name = "oxide-rust"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "oxide_rust"
+crate-type = ["staticlib", "cdylib"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
