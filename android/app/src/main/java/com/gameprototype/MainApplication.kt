@@ -22,6 +22,7 @@ class MainApplication : Application(), ReactApplication {
 
   override fun onCreate() {
     super.onCreate()
+    System.loadLibrary("oxide_rust")
     loadReactNative(this)
   }
 }
