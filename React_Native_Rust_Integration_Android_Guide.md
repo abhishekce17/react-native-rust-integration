@@ -90,6 +90,28 @@ Install `cargo-ndk`:
 cargo install cargo-ndk
 ```
 
+> **Automatic NDK Detection vs. Manual Environment Variables:**
+> `cargo-ndk` automatically detects standard Android Studio NDK installations if `ANDROID_HOME` or `ANDROID_SDK_ROOT` is configured in your environment.
+>
+> If you have multiple NDKs installed or need to enforce a specific version, export `ANDROID_NDK_HOME` (or `NDK_HOME`) using the platform-appropriate path:
+>
+> - **macOS** (`~/.zshrc` or `~/.bashrc`):
+>   ```bash
+>   export ANDROID_NDK_HOME="$HOME/Library/Android/sdk/ndk/<installed-ndk-version>"
+>   ```
+> - **Linux** (`~/.bashrc`):
+>   ```bash
+>   export ANDROID_NDK_HOME="$HOME/Android/Sdk/ndk/<installed-ndk-version>"
+>   ```
+> - **Windows** (PowerShell / System Environment Variables):
+>   ```powershell
+>   $env:ANDROID_NDK_HOME = "$env:LOCALAPPDATA\Android\Sdk\ndk\<installed-ndk-version>"
+>   ```
+>   or in Command Prompt:
+>   ```cmd
+>   set ANDROID_NDK_HOME=%LOCALAPPDATA%\Android\Sdk\ndk\<installed-ndk-version>
+>   ```
+
 In `android/gradle.properties`, verify settings appropriate for your RN version. In a New Architecture project this commonly includes:
 
 ```properties
@@ -161,6 +183,9 @@ crate-type = ["staticlib"]
 
 [build-dependencies]
 cbindgen = "0.29"
+
+[profile.dev]
+panic = "abort"
 
 [profile.release]
 panic = "abort"
@@ -458,13 +483,19 @@ This is the header file requested for the integration. It declares the C++ Turbo
 ```cpp
 #pragma once
 
+#if __has_include(<React-Codegen/RustModuleSpecsJSI.h>) // iOS / CocoaPods
+#include <React-Codegen/RustModuleSpecsJSI.h>
+#elif __has_include(<RustModuleSpecsJSI.h>) // Android / CMake
 #include <RustModuleSpecsJSI.h>
+#endif
 
 #include <memory>
 
-extern "C" {
-#include <rust_core.h>
-}
+// Forward declaration of opaque Rust state struct.
+// NativeRustModule.h does NOT include <rust_core.h>, keeping Rust C ABI headers
+// private to NativeRustModule.cpp and preventing header resolution failures
+// in iOS app-target translation units (e.g., RustModuleProvider.mm).
+struct RustData;
 
 namespace facebook::react {
 
@@ -478,13 +509,16 @@ class NativeRustModule
   void install(jsi::Runtime& runtime);
 
  private:
-  RustData* data_{nullptr};
+  // std::shared_ptr with custom deleter ensures safe, lifetime-managed native
+  // state that can be captured by value in JSI HostFunctions, avoiding dangling
+  // [this] pointer crashes across JS reloads/Fast Refresh.
+  std::shared_ptr<RustData> data_{nullptr};
 };
 
 } // namespace facebook::react
 ```
 
-The `RustData*` type is opaque: C++ stores the pointer but never accesses the internal Rust struct fields.
+The `struct RustData;` forward declaration keeps the header fully encapsulated across both Android and iOS without leaking private Rust headers. `std::shared_ptr` provides reload-safe lifetime management.
 
 ---
 
@@ -495,7 +529,12 @@ This file contains the generic C++17 binder, function registration, string conve
 ```cpp
 #include "NativeRustModule.h"
 
+extern "C" {
+#include <rust_core.h>
+}
+
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -514,18 +553,27 @@ using jsi::PropNameID;
 using jsi::Runtime;
 using jsi::Value;
 
-// Holds UTF-8 storage for as long as the Rust function call needs it.
-// The implicit conversion allows a Rust function expecting const char* to
-// receive the temporary string buffer for the duration of that call.
+// Holds temporary UTF-8 storage for the duration of the C ABI call.
 struct JsiStringArg {
   std::string value;
   operator const char*() const noexcept { return value.c_str(); }
 };
 
+// RAII guard ensuring Rust-allocated strings are always freed via rust_string_free,
+// even if jsi::String::createFromUtf8 throws a JSError or memory exception.
+struct RustStringGuard {
+  char* ptr;
+  explicit RustStringGuard(char* p) noexcept : ptr(p) {}
+  ~RustStringGuard() {
+    if (ptr != nullptr) {
+      rust_string_free(ptr);
+    }
+  }
+  RustStringGuard(const RustStringGuard&) = delete;
+  RustStringGuard& operator=(const RustStringGuard&) = delete;
+};
+
 // JS value -> native argument.
-//
-// `auto` is intentional: for const char* input, return JsiStringArg so the
-// temporary storage remains alive until the C ABI call returns.
 template <typename T>
 auto fromJsi(Runtime& runtime, const Value& value) {
   using U = std::decay_t<T>;
@@ -547,16 +595,36 @@ auto fromJsi(Runtime& runtime, const Value& value) {
     return value.getBool();
   } else if constexpr (std::is_floating_point_v<U>) {
     if (!value.isNumber()) {
-      throw JSError(runtime, "Expected a numeric argument");
+      throw JSError(runtime, "Expected a numeric floating-point argument");
     }
-    return static_cast<U>(value.asNumber());
+    const double number = value.asNumber();
+
+    if (!std::isfinite(number)) {
+      throw JSError(
+          runtime,
+          "Floating-point argument must be finite (NaN and Infinity are not allowed)");
+    }
+
+    const double minTarget =
+        static_cast<double>(std::numeric_limits<U>::lowest());
+    const double maxTarget =
+        static_cast<double>(std::numeric_limits<U>::max());
+
+    // Validate before narrowing the value to prevent undefined behavior
+    if (number < minTarget || number > maxTarget) {
+      throw JSError(
+          runtime,
+          "Floating-point argument exceeds the target range");
+    }
+
+    return static_cast<U>(number);
   } else if constexpr (std::is_integral_v<U>) {
     if (!value.isNumber()) {
       throw JSError(runtime, "Expected a numeric integer argument");
     }
 
     const double number = value.asNumber();
-    if (number != std::trunc(number) ||
+    if (!std::isfinite(number) || number != std::trunc(number) ||
         number < static_cast<double>(std::numeric_limits<U>::lowest()) ||
         number > static_cast<double>(std::numeric_limits<U>::max())) {
       throw JSError(runtime, "Integer argument is fractional or out of range");
@@ -569,9 +637,10 @@ auto fromJsi(Runtime& runtime, const Value& value) {
 
 // Native return -> JS value.
 //
-// char* is reserved here for a Rust-owned string returned from a function
-// that uses this API's rust_string_free() allocator/deallocator pair.
-// Do not use char* return support for memory owned by another allocator.
+// OWNERSHIP CONTRACT:
+// `char*` is strictly reserved for dynamically allocated C strings returned
+// from Rust that MUST be deallocated by rust_string_free().
+// `const char*` is for borrowed/constant strings that must NOT be deallocated.
 template <typename T>
 Value toJsi(Runtime& runtime, T&& value) {
   using U = std::decay_t<T>;
@@ -580,8 +649,13 @@ Value toJsi(Runtime& runtime, T&& value) {
     return Value::undefined();
   } else if constexpr (std::is_same_v<U, bool>) {
     return Value(static_cast<bool>(value));
-  } else if constexpr (std::is_floating_point_v<U> ||
-                       std::is_integral_v<U>) {
+  } else if constexpr (std::is_floating_point_v<U>) {
+    const double result = static_cast<double>(value);
+    if (!std::isfinite(result)) {
+      throw JSError(runtime, "Floating-point return value must be finite (NaN and Infinity are not allowed)");
+    }
+    return Value(result);
+  } else if constexpr (std::is_integral_v<U>) {
     return Value(static_cast<double>(value));
   } else if constexpr (std::is_same_v<U, const char*>) {
     if (value == nullptr) {
@@ -592,9 +666,9 @@ Value toJsi(Runtime& runtime, T&& value) {
     if (value == nullptr) {
       return Value::null();
     }
-    auto jsString = jsi::String::createFromUtf8(runtime, value);
-    rust_string_free(value);
-    return Value(std::move(jsString));
+    // RAII guard frees the Rust pointer even if createFromUtf8 throws
+    RustStringGuard guard{value};
+    return Value(jsi::String::createFromUtf8(runtime, value));
   } else if constexpr (std::is_same_v<U, std::string>) {
     return Value(jsi::String::createFromUtf8(runtime, value));
   } else {
@@ -611,7 +685,6 @@ Value invoke(
     std::index_sequence<I...>) {
   constexpr std::size_t expectedCount = sizeof...(Args);
 
-  // Exact count matters: ignoring extra values can conceal JS call mistakes.
   if (count != expectedCount) {
     throw JSError(
         runtime,
@@ -629,8 +702,7 @@ Value invoke(
   }
 }
 
-// Generic C++17 binder. It infers argument and return types from the function
-// pointer and shares conversion/validation logic among all registered methods.
+// Generic C++17 binder: automatically maps function pointer signatures.
 template <typename Ret, typename... Args>
 void bind(
     Runtime& runtime,
@@ -665,32 +737,27 @@ void bind(
 NativeRustModule::NativeRustModule(std::shared_ptr<CallInvoker> jsInvoker)
     : NativeRustModuleCxxSpec(std::move(jsInvoker)) {}
 
-NativeRustModule::~NativeRustModule() {
-  if (data_ != nullptr) {
-    rust_data_destroy(data_);
-    data_ = nullptr;
-  }
-}
+NativeRustModule::~NativeRustModule() = default;
 
 void NativeRustModule::install(Runtime& runtime) {
   Object api(runtime);
 
-  // Generic bindings: one line per compatible Rust C ABI function.
+  // Generic 1-line bindings:
   bind(runtime, api, "add", rust_add);
   bind(runtime, api, "multiply", rust_multiply);
   bind(runtime, api, "isPositive", rust_is_positive);
   bind(runtime, api, "greeting", rust_greeting);
 
-  // Create the optional Rust-owned data instance once for this module.
-  if (data_ == nullptr) {
-    data_ = rust_data_create(16);
-    if (data_ == nullptr) {
-      throw JSError(runtime, "Could not allocate the native data instance");
+  // Allocate stateful data structure using std::shared_ptr with custom deleter:
+  if (!data_) {
+    data_ = std::shared_ptr<RustData>(rust_data_create(16), rust_data_destroy);
+    if (!data_) {
+      throw JSError(runtime, "Could not allocate native RustData instance");
     }
   }
 
-  // Stateful operations are explicit because they need the native-owned
-  // pointer and have different lifetime rules from stateless scalar calls.
+  // Capture shared_ptr by value so HostFunction owns a strong reference to data,
+  // making it completely independent of NativeRustModule's lifetime across Fast Refresh/reload.
   api.setProperty(
       runtime,
       "setValue",
@@ -698,27 +765,46 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "setValue"),
           2,
-          [this](Runtime& rt, const Value&, const Value* args,
-                 std::size_t count) -> Value {
+          [data = this->data_](Runtime& rt, const Value&, const Value* args,
+                               std::size_t count) -> Value {
+            if (!data) {
+              throw JSError(rt, "Native data instance is null");
+            }
             if (count != 2 || !args[0].isNumber() || !args[1].isNumber()) {
               throw JSError(rt, "setValue(index, value) expects two numbers");
             }
 
             const double rawIndex = args[0].asNumber();
-            if (rawIndex < 0 || rawIndex != std::trunc(rawIndex)) {
-              throw JSError(rt, "index must be a non-negative integer");
+            if (!std::isfinite(rawIndex) || rawIndex < 0 || rawIndex != std::trunc(rawIndex)) {
+              throw JSError(rt, "index must be a non-negative finite integer");
             }
 
-            // This example allocates exactly 16 values. Check the bound before
-            // converting the double to size_t, so extremely large inputs cannot
-            // overflow or produce an out-of-range integer conversion.
+            const double rawValue = args[1].asNumber();
+            if (!std::isfinite(rawValue)) {
+              throw JSError(rt, "value must be a finite floating-point number");
+            }
+
+            const double minFloat =
+                static_cast<double>(std::numeric_limits<float>::lowest());
+            const double maxFloat =
+                static_cast<double>(std::numeric_limits<float>::max());
+
+            // Validate before narrowing the value to prevent undefined behavior
+            if (rawValue < minFloat || rawValue > maxFloat) {
+              throw JSError(
+                  rt,
+                  "value exceeds the finite float32 range");
+            }
+
+            const float convertedValue = static_cast<float>(rawValue);
+
             if (rawIndex >= 16.0) {
               return Value(false);
             }
 
             const auto index = static_cast<std::size_t>(rawIndex);
             const bool success = rust_data_set(
-                data_, index, static_cast<float>(args[1].asNumber()));
+                data.get(), index, convertedValue);
             return Value(success);
           }));
 
@@ -729,14 +815,17 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getValues"),
           0,
-          [this](Runtime& rt, const Value&, const Value*,
-                 std::size_t count) -> Value {
+          [data = this->data_](Runtime& rt, const Value&, const Value*,
+                               std::size_t count) -> Value {
+            if (!data) {
+              return Value::null();
+            }
             if (count != 0) {
               throw JSError(rt, "getValues() does not accept arguments");
             }
 
             std::size_t length = 0;
-            const float* source = rust_data_values(data_, &length);
+            const float* source = rust_data_values(data.get(), &length);
             if (source == nullptr || length == 0) {
               return Value::null();
             }
