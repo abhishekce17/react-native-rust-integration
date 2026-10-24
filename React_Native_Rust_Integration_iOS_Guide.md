@@ -1124,6 +1124,30 @@ target 'GamePrototype' do
       config[:reactNativePath],
       :mac_catalyst_enabled => false
     )
+
+    # Automatically ensure RustModuleProvider.mm is in Xcode's GamePrototype compile sources
+    require 'xcodeproj'
+    project_path = "#{Pod::Config.instance.installation_root}/GamePrototype.xcodeproj"
+    project = Xcodeproj::Project.open(project_path)
+    target = project.targets.find { |t| t.name == 'GamePrototype' }
+    group = project.main_group.find_subpath('GamePrototype')
+
+    source_files = ['RustModuleProvider.h', 'RustModuleProvider.mm']
+    changed = false
+
+    source_files.each do |file_name|
+      rel_path = "GamePrototype/#{file_name}"
+      file_ref = group.find_file_by_path(rel_path) || group.new_file(rel_path)
+      if file_name.end_with?('.mm') && !target.source_build_phase.files_references.include?(file_ref)
+        target.add_file_references([file_ref])
+        changed = true
+      end
+    end
+
+    if changed
+      project.save
+      Pod::UI.puts "[RustModule] Automatically added RustModuleProvider.mm to Xcode GamePrototype target".green
+    end
   end
 end
 ```
@@ -1196,7 +1220,7 @@ NS_ASSUME_NONNULL_END
 The separation across platforms is now clean and modular:
 - **Cross-platform C++ Core (`shared/`):** Contains `NativeRustModule.h` and `NativeRustModule.cpp`. This is strictly platform-agnostic C++17 JSI code compiled by CMake on Android and by CocoaPods (`RustModule.podspec`) on iOS.
 - **iOS App-Level Provider (`ios/GamePrototype/`):** Contains `RustModuleProvider.h` and `RustModuleProvider.mm`.
-  1. **Compile Sources Membership:** Ensure `RustModuleProvider.mm` is added to your iOS app target (`GamePrototype`) under **Build Phases > Compile Sources** in Xcode (`project.pbxproj`).
+  1. **Compile Sources Membership (Automated via Podfile):** The `post_install` hook in `Podfile` uses CocoaPods' built-in `xcodeproj` library to automatically add `RustModuleProvider.mm` to your iOS app target (`GamePrototype`) under **Build Phases > Compile Sources** in Xcode (`project.pbxproj`) whenever `pod install` runs. No manual Xcode drag-and-drop is required.
   2. **App-Target Header Resolution:** `RustModuleProvider.mm` imports `<RustModule/NativeRustModule.h>`. This is resolved automatically via CocoaPods default `$(PODS_ROOT)/Headers/Public` search path and `s.public_header_files = "shared/**/*.h"`, without requiring `s.user_target_xcconfig`.
   3. **Transitive Header Encapsulation (Eliminating `rust_core.h` leakage):** `NativeRustModule.h` uses a forward declaration `struct RustData;` and does NOT include `<rust_core.h>`. This guarantees that the app-target translation unit does not transitively depend on `rust_core.h` (which is only present in the pod's private search paths). `#include <rust_core.h>` is restricted entirely to `NativeRustModule.cpp` within the pod target.
   4. **Runtime Instantiation:** React Native Codegen generates `RCTModuleProviders.mm`, which resolves the provider dynamically via `[NSClassFromString(@"RustModuleProvider") new]`. Because `RustModuleProvider` is compiled directly into the application binary, it is guaranteed to be present in the Objective-C runtime class registry.

@@ -11,6 +11,10 @@ crate-type = ["staticlib"]
 [build-dependencies]
 cbindgen = "0.29"
 
+# Enforce panic = "abort" across all profiles to prevent unwinding across the C ABI
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

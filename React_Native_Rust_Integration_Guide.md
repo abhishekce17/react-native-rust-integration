@@ -1108,6 +1108,30 @@ target 'GamePrototype' do
       config[:reactNativePath],
       :mac_catalyst_enabled => false
     )
+
+    # Automatically ensure RustModuleProvider.mm is in Xcode's GamePrototype compile sources
+    require 'xcodeproj'
+    project_path = "#{Pod::Config.instance.installation_root}/GamePrototype.xcodeproj"
+    project = Xcodeproj::Project.open(project_path)
+    target = project.targets.find { |t| t.name == 'GamePrototype' }
+    group = project.main_group.find_subpath('GamePrototype')
+
+    source_files = ['RustModuleProvider.h', 'RustModuleProvider.mm']
+    changed = false
+
+    source_files.each do |file_name|
+      rel_path = "GamePrototype/#{file_name}"
+      file_ref = group.find_file_by_path(rel_path) || group.new_file(rel_path)
+      if file_name.end_with?('.mm') && !target.source_build_phase.files_references.include?(file_ref)
+        target.add_file_references([file_ref])
+        changed = true
+      end
+    end
+
+    if changed
+      project.save
+      Pod::UI.puts "[RustModule] Automatically added RustModuleProvider.mm to Xcode GamePrototype target".green
+    end
   end
 end
 ```
@@ -1174,9 +1198,9 @@ NS_ASSUME_NONNULL_END
 @end
 ```
 
-> [!IMPORTANT]
-> **CRITICAL XCODE STEP:**
-> Ensure `RustModuleProvider.mm` is added to your iOS app target (`GamePrototype`) in Xcode under **Build Phases > Compile Sources**. If omitted from the target's compile sources, `[NSClassFromString(@"RustModuleProvider") new]` will return `nil` at runtime, causing installation to fail.
+> [!TIP]
+> **AUTOMATIC XCODE REGISTRATION:**
+> The `post_install` hook in `ios/Podfile` automatically adds `RustModuleProvider.mm` to Xcode's app target compile sources whenever `pod install` runs using CocoaPods' built-in `xcodeproj` library. No manual drag-and-drop or project editing is required.
 
 ---
 

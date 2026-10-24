@@ -1,6 +1,11 @@
 #include "NativeRustModule.h"
 
+extern "C" {
+#include <rust_core.h>
+}
+
 #include <cstddef>
+#include <cstdint>
 #include <cmath>
 #include <limits>
 #include <string>
@@ -19,18 +24,27 @@ using jsi::PropNameID;
 using jsi::Runtime;
 using jsi::Value;
 
-// Holds UTF-8 storage for as long as the Rust function call needs it.
-// The implicit conversion allows a Rust function expecting const char* to
-// receive the temporary string buffer for the duration of that call.
+// RAII guard ensuring Rust-allocated strings are always freed via rust_string_free,
+// even if jsi::String::createFromUtf8 throws a JSError or memory exception.
+struct RustStringGuard {
+  char* ptr;
+  explicit RustStringGuard(char* p) noexcept : ptr(p) {}
+  ~RustStringGuard() {
+    if (ptr != nullptr) {
+      rust_string_free(ptr);
+    }
+  }
+  RustStringGuard(const RustStringGuard&) = delete;
+  RustStringGuard& operator=(const RustStringGuard&) = delete;
+};
+
+// Holds temporary UTF-8 storage for the duration of the C ABI call.
 struct JsiStringArg {
   std::string value;
   operator const char*() const noexcept { return value.c_str(); }
 };
 
 // JS value -> native argument.
-//
-// `auto` is intentional: for const char* input, return JsiStringArg so the
-// temporary storage remains alive until the C ABI call returns.
 template <typename T>
 auto fromJsi(Runtime& runtime, const Value& value) {
   using U = std::decay_t<T>;
@@ -52,19 +66,69 @@ auto fromJsi(Runtime& runtime, const Value& value) {
     return value.getBool();
   } else if constexpr (std::is_floating_point_v<U>) {
     if (!value.isNumber()) {
-      throw JSError(runtime, "Expected a numeric argument");
+      throw JSError(runtime, "Expected a numeric floating-point argument");
     }
-    return static_cast<U>(value.asNumber());
+    const double number = value.asNumber();
+
+    if (!std::isfinite(number)) {
+      throw JSError(
+          runtime,
+          "Floating-point argument must be finite (NaN and Infinity are not allowed)");
+    }
+
+    const double minTarget =
+        static_cast<double>(std::numeric_limits<U>::lowest());
+    const double maxTarget =
+        static_cast<double>(std::numeric_limits<U>::max());
+
+    if (number < minTarget || number > maxTarget) {
+      throw JSError(
+          runtime,
+          "Floating-point argument exceeds the target range");
+    }
+
+    return static_cast<U>(number);
   } else if constexpr (std::is_integral_v<U>) {
+    // 64-bit integers supported via JavaScript BigInt
+    if constexpr (std::is_same_v<U, int64_t>) {
+      if (value.isBigInt()) {
+        return value.getBigInt(runtime).asInt64(runtime);
+      }
+    } else if constexpr (std::is_same_v<U, uint64_t>) {
+      if (value.isBigInt()) {
+        return value.getBigInt(runtime).asUint64(runtime);
+      }
+    }
+
     if (!value.isNumber()) {
-      throw JSError(runtime, "Expected a numeric integer argument");
+      throw JSError(runtime, "Expected a numeric integer or BigInt argument");
     }
 
     const double number = value.asNumber();
-    if (number != std::trunc(number) ||
-        number < static_cast<double>(std::numeric_limits<U>::lowest()) ||
-        number > static_cast<double>(std::numeric_limits<U>::max())) {
-      throw JSError(runtime, "Integer argument is fractional or out of range");
+    if (!std::isfinite(number) || number != std::trunc(number)) {
+      throw JSError(runtime, "Integer argument is fractional or non-finite");
+    }
+
+    constexpr double kMaxSafeInteger = 9007199254740991.0;
+    constexpr double kMinSafeInteger = -9007199254740991.0;
+
+    double lower = kMinSafeInteger;
+    double upper = kMaxSafeInteger;
+
+    if constexpr (std::is_signed_v<U>) {
+      if constexpr (sizeof(U) < sizeof(int64_t)) {
+        lower = static_cast<double>(std::numeric_limits<U>::lowest());
+        upper = static_cast<double>(std::numeric_limits<U>::max());
+      }
+    } else {
+      lower = 0.0;
+      if constexpr (sizeof(U) < sizeof(uint64_t)) {
+        upper = static_cast<double>(std::numeric_limits<U>::max());
+      }
+    }
+
+    if (number < lower || number > upper) {
+      throw JSError(runtime, "Integer argument is out of safe range");
     }
     return static_cast<U>(number);
   } else {
@@ -73,10 +137,6 @@ auto fromJsi(Runtime& runtime, const Value& value) {
 }
 
 // Native return -> JS value.
-//
-// char* is reserved here for a Rust-owned string returned from a function
-// that uses this API's rust_string_free() allocator/deallocator pair.
-// Do not use char* return support for memory owned by another allocator.
 template <typename T>
 Value toJsi(Runtime& runtime, T&& value) {
   using U = std::decay_t<T>;
@@ -85,8 +145,17 @@ Value toJsi(Runtime& runtime, T&& value) {
     return Value::undefined();
   } else if constexpr (std::is_same_v<U, bool>) {
     return Value(static_cast<bool>(value));
-  } else if constexpr (std::is_floating_point_v<U> ||
-                       std::is_integral_v<U>) {
+  } else if constexpr (std::is_same_v<U, int64_t>) {
+    return Value(jsi::BigInt::fromInt64(runtime, value));
+  } else if constexpr (std::is_same_v<U, uint64_t>) {
+    return Value(jsi::BigInt::fromUint64(runtime, value));
+  } else if constexpr (std::is_floating_point_v<U>) {
+    const double result = static_cast<double>(value);
+    if (!std::isfinite(result)) {
+      throw JSError(runtime, "Floating-point return value must be finite (NaN and Infinity are not allowed)");
+    }
+    return Value(result);
+  } else if constexpr (std::is_integral_v<U>) {
     return Value(static_cast<double>(value));
   } else if constexpr (std::is_same_v<U, const char*>) {
     if (value == nullptr) {
@@ -97,9 +166,8 @@ Value toJsi(Runtime& runtime, T&& value) {
     if (value == nullptr) {
       return Value::null();
     }
-    auto jsString = jsi::String::createFromUtf8(runtime, value);
-    rust_string_free(value);
-    return Value(std::move(jsString));
+    RustStringGuard guard{value};
+    return Value(jsi::String::createFromUtf8(runtime, value));
   } else if constexpr (std::is_same_v<U, std::string>) {
     return Value(jsi::String::createFromUtf8(runtime, value));
   } else {
@@ -116,7 +184,6 @@ Value invoke(
     std::index_sequence<I...>) {
   constexpr std::size_t expectedCount = sizeof...(Args);
 
-  // Exact count matters: ignoring extra values can conceal JS call mistakes.
   if (count != expectedCount) {
     throw JSError(
         runtime,
@@ -134,8 +201,6 @@ Value invoke(
   }
 }
 
-// Generic C++17 binder. It infers argument and return types from the function
-// pointer and shares conversion/validation logic among all registered methods.
 template <typename Ret, typename... Args>
 void bind(
     Runtime& runtime,
@@ -170,32 +235,27 @@ void bind(
 NativeRustModule::NativeRustModule(std::shared_ptr<CallInvoker> jsInvoker)
     : NativeRustModuleCxxSpec(std::move(jsInvoker)) {}
 
-NativeRustModule::~NativeRustModule() {
-  if (data_ != nullptr) {
-    rust_data_destroy(data_);
-    data_ = nullptr;
-  }
-}
+NativeRustModule::~NativeRustModule() = default;
 
 void NativeRustModule::install(Runtime& runtime) {
   Object api(runtime);
 
-  // Generic bindings: one line per compatible Rust C ABI function.
+  // Generic 1-line bindings:
   bind(runtime, api, "add", rust_add);
   bind(runtime, api, "multiply", rust_multiply);
   bind(runtime, api, "isPositive", rust_is_positive);
   bind(runtime, api, "greeting", rust_greeting);
 
-  // Create the optional Rust-owned data instance once for this module.
-  if (data_ == nullptr) {
-    data_ = rust_data_create(16);
-    if (data_ == nullptr) {
-      throw JSError(runtime, "Could not allocate the native data instance");
+  // Allocate stateful data structure using std::shared_ptr with custom deleter:
+  if (!data_) {
+    data_ = std::shared_ptr<RustData>(rust_data_create(16), rust_data_destroy);
+    if (!data_) {
+      throw JSError(runtime, "Could not allocate native RustData instance");
     }
   }
 
-  // Stateful operations are explicit because they need the native-owned
-  // pointer and have different lifetime rules from stateless scalar calls.
+  // Capture shared_ptr by value so HostFunction owns a strong reference to data,
+  // making it completely independent of NativeRustModule's lifetime across Fast Refresh/reload.
   api.setProperty(
       runtime,
       "setValue",
@@ -203,30 +263,49 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "setValue"),
           2,
-          [this](Runtime& rt, const Value&, const Value* args,
-                 std::size_t count) -> Value {
+          [data = this->data_](Runtime& rt, const Value&, const Value* args,
+                               std::size_t count) -> Value {
+            if (!data) {
+              throw JSError(rt, "Native data instance is null");
+            }
             if (count != 2 || !args[0].isNumber() || !args[1].isNumber()) {
               throw JSError(rt, "setValue(index, value) expects two numbers");
             }
 
             const double rawIndex = args[0].asNumber();
-            if (rawIndex < 0 || rawIndex != std::trunc(rawIndex)) {
-              throw JSError(rt, "index must be a non-negative integer");
+            if (!std::isfinite(rawIndex) || rawIndex < 0 || rawIndex != std::trunc(rawIndex)) {
+              throw JSError(rt, "index must be a non-negative finite integer");
             }
 
-            // This example allocates exactly 16 values. Check the bound before
-            // converting the double to size_t, so extremely large inputs cannot
-            // overflow or produce an out-of-range integer conversion.
+            const double rawValue = args[1].asNumber();
+            if (!std::isfinite(rawValue)) {
+              throw JSError(rt, "value must be a finite floating-point number");
+            }
+
+            const double minFloat =
+                static_cast<double>(std::numeric_limits<float>::lowest());
+            const double maxFloat =
+                static_cast<double>(std::numeric_limits<float>::max());
+
+            if (rawValue < minFloat || rawValue > maxFloat) {
+              throw JSError(
+                  rt,
+                  "value exceeds the finite float32 range");
+            }
+
+            const float convertedValue = static_cast<float>(rawValue);
+
             if (rawIndex >= 16.0) {
               return Value(false);
             }
 
             const auto index = static_cast<std::size_t>(rawIndex);
             const bool success = rust_data_set(
-                data_, index, static_cast<float>(args[1].asNumber()));
+                data.get(), index, convertedValue);
             return Value(success);
           }));
 
+  // Stateful getter: copies Rust memory into JS Float32Array (Safe synchronous copy)
   api.setProperty(
       runtime,
       "getValues",
@@ -234,22 +313,23 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getValues"),
           0,
-          [this](Runtime& rt, const Value&, const Value*,
-                 std::size_t count) -> Value {
+          [data = this->data_](Runtime& rt, const Value&, const Value*,
+                               std::size_t count) -> Value {
+            if (!data) {
+              return Value::null();
+            }
             if (count != 0) {
               throw JSError(rt, "getValues() does not accept arguments");
             }
 
             std::size_t length = 0;
-            const float* source = rust_data_values(data_, &length);
+            const float* source = rust_data_values(data.get(), &length);
             if (source == nullptr || length == 0) {
               return Value::null();
             }
 
             const std::size_t byteCount = length * sizeof(float);
 
-            // This allocates a JS-owned ArrayBuffer and copies the native
-            // memory into it. This is intentionally a COPY, not zero-copy.
             Object bufferObject = rt.global()
                 .getPropertyAsFunction(rt, "ArrayBuffer")
                 .callAsConstructor(rt, static_cast<double>(byteCount))
