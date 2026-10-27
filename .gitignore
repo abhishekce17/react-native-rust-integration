@@ -1,0 +1,108 @@
+# OSX / Apple
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
+
+# Xcode / iOS
+build/
+**/build/
+DerivedData/
+**/DerivedData/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+**/xcuserdata/
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.xcuserstate
+**/.xcode.env.local
+**/Pods/
+
+# Android / IntelliJ
+.idea/
+**/.idea/
+.gradle/
+**/.gradle/
+local.properties
+**/local.properties
+*.iml
+**/*.iml
+*.hprof
+.cxx/
+**/.cxx/
+*.keystore
+!debug.keystore
+!**/debug.keystore
+.kotlin/
+**/.kotlin/
+captures/
+.externalNativeBuild/
+
+# Node.js / React Native / Metro
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.jsbundle
+.metro-health-check*
+
+# Fastlane
+**/fastlane/report.xml
+**/fastlane/Preview.html
+**/fastlane/screenshots
+**/fastlane/test_output
+
+# Ruby / CocoaPods / Bundler
+**/vendor/bundle/
+**/vendor/ruby/
+/vendor/bundle/
+
+# Testing & Coverage
+coverage/
+**/coverage/
+*.lcov
+.nyc_output/
+
+# Yarn
+**/.yarn/*
+!**/.yarn/patches
+!**/.yarn/plugins
+!**/.yarn/releases
+!**/.yarn/sdks
+!**/.yarn/versions
+
+# Rust
+target/
+**/target/
+**/*.rs.bk
+
+# Environment & Secrets
+.env
+.env.local
+.env.*.local
+*.env.local
+
+# Editor files
+*.swp
+*.swo
+*~
