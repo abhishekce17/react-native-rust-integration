@@ -878,8 +878,11 @@ void NativeRustModule::install(Runtime& runtime) {
     }
   }
 
-  // Capture shared_ptr by value so HostFunction owns a strong reference to data,
-  // making it completely independent of NativeRustModule's lifetime across Fast Refresh/reload.
+  // Hoist shared_ptr copy to local scope once. All HostFunction closures capture
+  // 'data' by value, making them completely independent of NativeRustModule's
+  // lifetime across Fast Refresh/reload and eliminating the 'this' keyword entirely.
+  auto data = data_;
+
   api.setProperty(
       runtime,
       "setValue",
@@ -887,8 +890,8 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "setValue"),
           2,
-          [data = this->data_](Runtime& rt, const Value&, const Value* args,
-                               std::size_t count) -> Value {
+          [data](Runtime& rt, const Value&, const Value* args,
+                 std::size_t count) -> Value {
             if (!data) {
               throw JSError(rt, "Native data instance is null");
             }
@@ -929,7 +932,7 @@ void NativeRustModule::install(Runtime& runtime) {
             return Value(success);
           }));
 
-  // Stateful getter: copies Rust memory into JS Float32Array (Safe synchronous copy)
+  // Stateful getter: copies Rust memory into JS Float32Array (Safe synchronous copy between allocators)
   api.setProperty(
       runtime,
       "getValues",
@@ -937,8 +940,8 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getValues"),
           0,
-          [data = this->data_](Runtime& rt, const Value&, const Value*,
-                               std::size_t count) -> Value {
+          [data](Runtime& rt, const Value&, const Value*,
+                 std::size_t count) -> Value {
             if (!data) {
               return Value::null();
             }
@@ -1056,8 +1059,10 @@ void NativeRustModule::install(Runtime& runtime) {
 >   // =============================================================================
 >   // STEP 2: CAPTURE CACHED CONSTRUCTORS IN HOSTFUNCTION LAMBDA
 >   // =============================================================================
+>   // Hoist shared pointer to local scope once:
+>   //   auto data = data_;
 >   // Notice the lambda capture list:
->   //   [data = this->data_, arrayBufferCtor, float32ArrayCtor]
+>   //   [data, arrayBufferCtor, float32ArrayCtor]
 >   //
 >   // Capturing by value increments the shared_ptr reference count. When the JS
 >   // garbage collector eventually disposes of the HostFunction during app reload,
@@ -1070,7 +1075,7 @@ void NativeRustModule::install(Runtime& runtime) {
 >           runtime,
 >           PropNameID::forAscii(runtime, "getValues"),
 >           0, // Parameter count: 0 arguments expected
->           [data = this->data_, arrayBufferCtor, float32ArrayCtor](
+>           [data, arrayBufferCtor, float32ArrayCtor](
 >               Runtime& rt, const Value& thisValue, const Value* args, std::size_t count) -> Value {
 >             // Guard check: ensure underlying Rust engine instance is valid
 >             if (!data) {
@@ -1104,10 +1109,12 @@ void NativeRustModule::install(Runtime& runtime) {
 >                 .asObject(rt);
 >
 >             // -----------------------------------------------------------------
->             // 3. COPY BYTES DIRECTLY INTO JSI MANAGED BUFFER
+>             // 3. COPY BYTES DIRECTLY INTO JSI MANAGED BUFFER (CROSS-ALLOCATOR MEMCPY)
 >             // -----------------------------------------------------------------
->             // getArrayBuffer(rt) gives direct access to the JS buffer memory.
->             // std::memcpy performs a high-speed synchronous CPU memory block copy.
+>             // getArrayBuffer(rt) gives direct access to the JS engine's buffer memory.
+>             // std::memcpy performs a high-speed synchronous memory copy between two distinct
+>             // heap allocators (Rust global allocator -> Hermes/JSC heap). This copy is safe
+>             // and avoids dangling pointer or thread-safety hazards of raw zero-copy aliasing.
 >             ArrayBuffer buffer = bufferObject.getArrayBuffer(rt);
 >             std::memcpy(buffer.data(rt), source, byteCount);
 >
@@ -1159,68 +1166,13 @@ void NativeRustModule::install(Runtime& runtime) {
 > >    Every JSI handle (`jsi::Function`, `jsi::Object`, `jsi::Value`) is explicitly bound to a specific `jsi::Runtime` instance. If `NativeRustModule` holds `std::unique_ptr<jsi::Function>` members, their C++ destructors attempt to notify the runtime to clean up handles. If the `jsi::Runtime` is destroyed before the TurboModule C++ destructor executes, destructing `arrayBufferCtor_` calls into an already-freed `Runtime`, causing a fatal segmentation fault (`SIGSEGV`).
 > >
 > > **The Safe Architecture (Step 1 & Step 2):**
-> > Always use the closure-based shared pointer pattern demonstrated in Steps 1 and 2:
+> > Always hoist the shared pointer to local scope and capture by value without referencing `this`:
 > > ```cpp
-> > [data = this->data_, arrayBufferCtor, float32ArrayCtor](Runtime& rt, ...) -> Value
+> > auto data = data_;
+> > // HostFunction closure:
+> > [data, arrayBufferCtor, float32ArrayCtor](Runtime& rt, ...) -> Value
 > > ```
-> > Capturing `std::shared_ptr<jsi::Function>` by value directly into the HostFunction closure binds the constructors' lifetime directly to the HostFunction inside the JavaScript engine. When the runtime shuts down or when JavaScript garbage collects the HostFunction, the closure and its captured constructors are safely destroyed within the valid lifecycle of the runtime, preventing both UAF and runtime teardown crashes.
->
-> ---
->
-> ### High-Frequency Performance Best Practice: Event-Driven Bitmask Polling
->
-> While caching typed array constructors eliminates string reflection overhead, polling large entity buffers (e.g., 20–50 game entities or world layout blocks) on every 60/120 FPS frame still causes JavaScript heap churn when converting native buffer floats into UI objects.
->
-> **The Solution: Pair JSI TypedArrays with a Read-and-Clear Event Bitmask**
->
-> #### 1. Rust Bitmask Definition & Read-and-Clear Lifecycle Contract:
-> In Rust (`rust-core/src/game.rs` / `rust-core/src/lib.rs`), define bit flags and implement a **Read-and-Clear contract** inside `get_events()`:
-> ```rust
-> pub const EVENT_NONE: u32 = 0;
-> pub const EVENT_PADDLE_HIT: u32 = 1 << 0;
-> pub const EVENT_BRICK_HIT: u32 = 1 << 1;
-> pub const EVENT_BRICK_DESTROY: u32 = 1 << 2;
-> pub const EVENT_LAYOUT_CHANGED: u32 = 1 << 3;
->
-> // Lifecycle Contract: Reads and clears the flags under exclusive mutable access (&mut self)
-> // so events trigger exactly once per frame.
-> // Note: If events can be written from another thread (e.g. background worker or audio thread),
-> // use thread-safe synchronization such as std::sync::atomic::AtomicU32::swap(0, Ordering::AcqRel).
-> pub fn get_events(&mut self) -> u32 {
->     let current_events = self.events;
->     self.events = EVENT_NONE; // Cleared on read under exclusive mutable access
->     current_events
-> }
-> ```
->
-> > [!NOTE]
-> > **Integration Scope Note:**
-> > The event bitmask pattern requires its own C ABI export (`rust_game_get_events`), C++ JSI binding (`api.setProperty(runtime, "getEvents", ...)`), and TypeScript API declaration. These additions are domain-specific optimizations demonstrated in the `BrickBreaker` project (`rust-core/src/game.rs`, `shared/NativeRustModule.cpp`, `src/RustModule.ts`) and are not part of the basic generic `RustModule` bridge illustrated earlier in Sections 4 through 8.
->
-> #### 2. TypeScript Constants Mapping:
-> In TypeScript (`src/RustModule.ts`), mirror the Rust bitmask values:
-> ```ts
-> export const RUST_EVENT = {
->   PADDLE_HIT: 1 << 0,
->   BRICK_HIT: 1 << 1,
->   BRICK_DESTROY: 1 << 2,
->   LAYOUT_CHANGED: 1 << 3,
-> } as const;
-> ```
->
-> #### 3. Event-Driven Buffer Invalidation in Render Loop:
-> In the React / TypeScript render loop (`useGamePhysics.ts`), read the bitmask once per frame and only query the typed array buffer when mutation flags are set or on initial load:
-> ```ts
-> const events = engine.getEvents(); // Returns accumulated flags and clears native register
-> const hasMutation = (events & (RUST_EVENT.BRICK_HIT | RUST_EVENT.BRICK_DESTROY | RUST_EVENT.LAYOUT_CHANGED)) !== 0;
->
-> if (hasMutation || !initialLayoutLoaded) {
->   initialLayoutLoaded = true;
->   const bricksData = engine.getBricks(); // TypedArray getter called conditionally
->   // Parse buffer into state only when state actually changed
-> }
-> ```
-> This prevents persistent flags from causing repeated polling on subsequent frames and eliminates redundant object allocations during high-frequency simulation loops.
+> > Capturing `std::shared_ptr<jsi::Function>` and the native state by value directly into the HostFunction closure binds their lifetime to the HostFunction inside the JavaScript engine. When the runtime shuts down or when JavaScript garbage collects the HostFunction, the closure and its captured pointers are safely destroyed within the valid lifecycle of the runtime, preventing both UAF and runtime teardown crashes.
 >
 > ---
 >
@@ -1230,6 +1182,9 @@ void NativeRustModule::install(Runtime& runtime) {
 > | :--- | :--- | :--- |
 > | **String Hashing Lookups** | 360 to 720 lookups / sec | **0 lookups / sec (100% eliminated)** |
 > | **Memory Ownership** | JS owns ArrayBuffer | **JS owns ArrayBuffer** (no shared raw pointers across threads) |
+>
+> > [!NOTE]
+> > For advanced high-frequency simulation patterns demonstrating dynamic re-initialization via the `GameStateHolder` pattern, read-and-clear event bitmask polling, and live entity streaming, see [Section 14: Reference Application Case Study — BrickBreaker](#14-reference-application-case-study--brickbreaker-high-performance-game-engine).
 
 ---
 
@@ -1639,3 +1594,170 @@ To expose a new function (e.g. `subtract`):
    ```
 
 No manual JNI, Java, Kotlin, Swift, or Objective-C glue code is required for supported function signatures.
+
+---
+
+## 14. Reference Application Case Study — BrickBreaker High-Performance Game Engine
+
+The `examples/BrickBreaker` directory contains a complete production-grade reference application implementing an arcade BrickBreaker game. While Sections 1 through 13 describe the foundational generic bridge, high-frequency game engines introduce advanced architectural requirements that are demonstrated in the reference application.
+
+### 14.1 Dynamic Re-initialization with the `GameStateHolder` Pattern
+
+In static integrations, native state is allocated once during `install()`. In an arcade game, the player can change levels, rotate the screen, or restart the session via `init(width, height)`.
+
+#### The Stale Closure Hazard
+If the C++ TurboModule stores a direct pointer `std::shared_ptr<RustGame> game_`, calling `init()` replaces `game_` with a new instance:
+```cpp
+// HAZARD: Reassigning game_ orphans previously installed HostFunction closures
+void init(float width, float height) {
+  game_ = std::shared_ptr<RustGame>(rust_game_create(width, height), rust_game_destroy);
+}
+```
+Because existing HostFunction closures captured the original `std::shared_ptr<RustGame>` by value at startup, their captured copy continues to point to the destroyed instance. Subsequent calls (`step()`, `getBalls()`) operate on an orphaned game.
+
+#### The Solution: Indirection via `GameStateHolder`
+Wrap the game pointer inside a heap-allocated holder struct that maintains a stable identity across re-initializations:
+
+```cpp
+// shared/NativeRustModule.h
+struct GameStateHolder {
+  std::shared_ptr<RustGame> game{nullptr};
+};
+
+class NativeRustModule : public NativeRustModuleCxxSpec<NativeRustModule> {
+ private:
+  std::shared_ptr<GameStateHolder> state_{std::make_shared<GameStateHolder>()};
+};
+```
+
+In `NativeRustModule::install(Runtime& runtime)`:
+```cpp
+// 1. Hoist the state holder shared_ptr once at the top of install():
+auto state = state_;
+
+// 2. init() updates the inner game pointer, preserving the holder's stable identity:
+api.setProperty(runtime, "init",
+    Function::createFromHostFunction(runtime, PropNameID::forAscii(runtime, "init"), 2,
+        [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
+          if (count < 2 || !args[0].isNumber() || !args[1].isNumber()) {
+            throw JSError(rt, "init(width, height) expects 2 numbers");
+          }
+          double rawW = args[0].asNumber();
+          double rawH = args[1].asNumber();
+          if (!std::isfinite(rawW) || !std::isfinite(rawH) || rawW <= 0.0 || rawH <= 0.0 ||
+              rawW > static_cast<double>(std::numeric_limits<float>::max()) ||
+              rawH > static_cast<double>(std::numeric_limits<float>::max())) {
+            throw JSError(rt, "init(width, height) requires positive finite dimensions within float range");
+          }
+          // Safely destroys any prior instance and reassigns state->game:
+          state->game = std::shared_ptr<RustGame>(
+              rust_game_create(static_cast<float>(rawW), static_cast<float>(rawH)),
+              rust_game_destroy);
+          return Value::undefined();
+        }));
+
+// 3. All other HostFunctions access the current instance via state->game:
+api.setProperty(runtime, "step",
+    Function::createFromHostFunction(runtime, PropNameID::forAscii(runtime, "step"), 1,
+        [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
+          if (state->game && count >= 1 && args[0].isNumber()) {
+            double rawDt = args[0].asNumber();
+            if (std::isfinite(rawDt) && rawDt > 0.0 &&
+                rawDt <= static_cast<double>(std::numeric_limits<float>::max())) {
+              rust_game_step(state->game.get(), static_cast<float>(rawDt));
+            }
+          }
+          return Value::undefined();
+        }));
+```
+
+Every HostFunction retains the same outer `GameStateHolder` by value, ensuring all closures automatically access the newly recreated game instance while avoiding dangling `[this]` pointers.
+
+---
+
+### 14.2 High-Frequency Event-Driven Bitmask Polling
+
+While caching typed array constructors eliminates string reflection overhead, querying large brick grids (e.g. 24–60 bricks) on every 60/120 FPS frame causes JavaScript heap churn when converting buffer data into UI objects.
+
+#### 1. Rust Bitmask Definition & Read-and-Clear Lifecycle Contract:
+In Rust (`rust-core/src/types.rs`), define bit flags and implement a **Read-and-Clear contract** inside `get_events()`:
+```rust
+pub const EVENT_PADDLE_HIT: u32 = 1 << 0;
+pub const EVENT_BRICK_HIT: u32 = 1 << 1;
+pub const EVENT_BRICK_DESTROY: u32 = 1 << 2;
+pub const EVENT_POWERUP_COLLECT: u32 = 1 << 3;
+pub const EVENT_LIFE_LOST: u32 = 1 << 4;
+pub const EVENT_LEVEL_COMPLETED: u32 = 1 << 5;
+pub const EVENT_GAME_OVER: u32 = 1 << 6;
+
+// Lifecycle Contract: Reads and clears the flags under exclusive mutable access (&mut self)
+// so events trigger exactly once per frame.
+pub fn get_events(&mut self) -> u32 {
+    let current_events = self.events;
+    self.events = 0; // Cleared on read under exclusive mutable access
+    current_events
+}
+```
+
+#### 2. TypeScript Constants Mapping:
+In TypeScript (`src/RustModule.ts`), mirror the Rust bitmask values:
+```ts
+export const RUST_EVENT = {
+  PADDLE_HIT: 1 << 0,
+  BRICK_HIT: 1 << 1,
+  BRICK_DESTROY: 1 << 2,
+  POWERUP_COLLECT: 1 << 3,
+  LIFE_LOST: 1 << 4,
+  LEVEL_COMPLETED: 1 << 5,
+  GAME_OVER: 1 << 6,
+} as const;
+```
+
+#### 3. Event-Driven Buffer Invalidation in Render Loop:
+In the render loop (`src/features/gameplay/hooks/useGamePhysics.ts`), read the bitmask once per frame and only query the brick buffer when mutation flags are set or on initial load:
+```ts
+const events = engine.getEvents();
+const hasMutation = (events & (RUST_EVENT.BRICK_HIT | RUST_EVENT.BRICK_DESTROY)) !== 0;
+
+if (hasMutation || !initialLayoutLoaded) {
+  initialLayoutLoaded = true;
+  const bricksData = engine.getBricks(); // TypedArray getter called only on mutation
+  // Parse buffer into state only when state actually changed
+}
+```
+This avoids redundant buffer allocations on quiescent frames during simulation loops.
+
+---
+
+### 14.3 Numeric Validation in Game Simulations
+
+JavaScript numbers are IEEE 754 doubles. In game physics simulations:
+* Passing `NaN` to `step(dt)` causes comparisons like `ball.y <= field_h` to return `false`, which treats the ball as lost and instantly drops a player life ("NaN poisoning").
+* Casting out-of-range doubles (`1e40` to `float`) or negative numbers to unsigned integers (`setLevel(-1)` to `uint32_t`) is undefined behavior under ISO C++ (`[conv.fp]`, `[conv.fpint]`).
+
+All game methods in `shared/NativeRustModule.cpp` and `rust-core/src/game.rs` validate finite inputs:
+```cpp
+if (std::isfinite(rawDt) && rawDt > 0.0) {
+  rust_game_step(state->game.get(), static_cast<float>(rawDt));
+}
+```
+And in Rust:
+```rust
+pub fn step(&mut self, dt: f32) {
+    if !dt.is_finite() || dt <= 0.0 {
+        return;
+    }
+    let clamped_dt = dt.clamp(0.001, 0.033);
+    // ...
+}
+```
+
+---
+
+### 14.4 Safe Lifecycle & Last-Life State Machine
+
+To prevent soft-locks on the player's last life or after `revive()`:
+1. `reset_ball_on_paddle()` resets the state to `GameState::ReadyToLaunch` with the ball anchored to the paddle.
+2. `launch()` permits launching from both `GameState::ReadyToLaunch` and `GameState::LastLife`, transitioning to `GameState::LastLife` if `lives == 1` else `GameState::Active`.
+3. `revive()` restores 1 life, resets the ball on the paddle, and transitions to `GameState::ReadyToLaunch`.
+4. Front-end touch zones check for ready-to-launch states and allow instant launch on tap or after a preview timer.

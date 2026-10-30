@@ -123,3 +123,127 @@ fn test_metal_brick_four_hits_progression() {
     assert_eq!(game.bricks[metal_idx].hp, 0);
     assert!(game.bricks[metal_idx].destroyed);
 }
+
+#[test]
+fn test_launch_on_last_life() {
+    let mut game = RustGame::new(400.0, 800.0);
+    game.launch();
+
+    // Drop life 1 (3 -> 2)
+    game.balls[0].y = 900.0;
+    game.step(0.016);
+    assert_eq!(game.lives, 2);
+    assert_eq!(game.state, GameState::ReadyToLaunch);
+
+    // Launch and drop life 2 (2 -> 1)
+    game.launch();
+    assert_eq!(game.state, GameState::Active);
+    game.balls[0].y = 900.0;
+    game.step(0.016);
+    assert_eq!(game.lives, 1);
+    assert_eq!(game.state, GameState::ReadyToLaunch);
+    assert!(!game.is_launched);
+
+    // Launch on last life: must not soft-lock
+    game.launch();
+    assert!(game.is_launched);
+    assert_eq!(game.state, GameState::LastLife);
+
+    let initial_y = game.balls[0].y;
+    game.step(0.016);
+    assert!(game.balls[0].y < initial_y); // ball successfully advances upward
+    assert_eq!(game.lives, 1);
+}
+
+#[test]
+fn test_revive_and_launch() {
+    let mut game = RustGame::new(400.0, 800.0);
+    game.launch();
+
+    // Drop all 3 lives to trigger GameOver
+    game.balls[0].y = 900.0;
+    game.step(0.016); // 2 lives
+    game.launch();
+    game.balls[0].y = 900.0;
+    game.step(0.016); // 1 life
+    game.launch();
+    game.balls[0].y = 900.0;
+    game.step(0.016); // 0 lives -> GameOver
+
+    assert_eq!(game.lives, 0);
+    assert_eq!(game.state, GameState::GameOver);
+
+    // Revive
+    game.revive();
+    assert_eq!(game.lives, 1);
+    assert_eq!(game.state, GameState::ReadyToLaunch);
+    assert!(!game.is_launched);
+
+    // Launch after revive
+    game.launch();
+    assert!(game.is_launched);
+    assert_eq!(game.state, GameState::LastLife);
+
+    let initial_y = game.balls[0].y;
+    game.step(0.016);
+    assert!(game.balls[0].y < initial_y);
+    assert_eq!(game.lives, 1);
+}
+
+#[test]
+fn test_step_nan_infinity_negative_rejection() {
+    let mut game = RustGame::new(400.0, 800.0);
+    game.launch();
+    assert_eq!(game.lives, 3);
+    assert_eq!(game.balls.len(), 1);
+
+    let initial_x = game.balls[0].x;
+    let initial_y = game.balls[0].y;
+
+    // Passing NaN must NOT cause ball drop or life loss
+    game.step(f32::NAN);
+    assert_eq!(game.lives, 3);
+    assert_eq!(game.balls.len(), 1);
+    assert_eq!(game.balls[0].x, initial_x);
+    assert_eq!(game.balls[0].y, initial_y);
+
+    // Passing Infinity must NOT drop the ball
+    game.step(f32::INFINITY);
+    assert_eq!(game.lives, 3);
+    assert_eq!(game.balls.len(), 1);
+
+    // Passing negative or zero dt must NOT drop the ball
+    game.step(-1.0);
+    assert_eq!(game.lives, 3);
+    game.step(0.0);
+    assert_eq!(game.lives, 3);
+}
+
+#[test]
+fn test_paddle_nan_infinity_rejection() {
+    let mut game = RustGame::new(400.0, 800.0);
+    game.set_paddle(150.0, 0.2);
+    assert_eq!(game.paddle.x, 150.0);
+    assert_eq!(game.paddle.tilt, 0.2);
+
+    // Setting NaN must be rejected, preserving existing valid paddle state
+    game.set_paddle(f32::NAN, 0.5);
+    assert_eq!(game.paddle.x, 150.0);
+    assert_eq!(game.paddle.tilt, 0.2);
+
+    game.set_paddle(200.0, f32::NAN);
+    assert_eq!(game.paddle.x, 150.0);
+    assert_eq!(game.paddle.tilt, 0.2);
+
+    // Setting Infinity must be rejected
+    game.set_paddle(f32::INFINITY, 0.0);
+    assert_eq!(game.paddle.x, 150.0);
+}
+
+#[test]
+fn test_set_level_safe_range() {
+    let mut game = RustGame::new(400.0, 800.0);
+    game.set_level(0);
+    assert_eq!(game.level, 1);
+    assert!(!game.bricks.is_empty());
+}

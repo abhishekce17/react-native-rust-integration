@@ -9,6 +9,9 @@ use std::ptr;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_game_create(width: f32, height: f32) -> *mut RustGame {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return ptr::null_mut();
+    }
     Box::into_raw(Box::new(RustGame::new(width, height)))
 }
 

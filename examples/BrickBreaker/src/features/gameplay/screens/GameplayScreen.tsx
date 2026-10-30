@@ -100,7 +100,7 @@ export const GameplayScreen: React.FC = () => {
     const timer = setTimeout(() => {
       if (gameState === 'READY_TO_LAUNCH') {
         physics.launchBall();
-        setGameState('ACTIVE');
+        setGameState(physics.lives === 1 ? 'LAST_LIFE' : 'ACTIVE');
       }
     }, 1200);
     return () => clearTimeout(timer);
@@ -130,7 +130,7 @@ export const GameplayScreen: React.FC = () => {
   const handleLaunchBall = useCallback(() => {
     if (gameState === 'READY_TO_LAUNCH') {
       physics.launchBall();
-      setGameState('ACTIVE');
+      setGameState(physics.lives === 1 ? 'LAST_LIFE' : 'ACTIVE');
     }
   }, [gameState, physics]);
 

@@ -50,8 +50,15 @@ void NativeRustModule::install(Runtime& runtime) {
             if (count < 2 || !args[0].isNumber() || !args[1].isNumber()) {
               throw JSError(rt, "init(width, height) expects 2 numbers");
             }
-            float w = static_cast<float>(args[0].asNumber());
-            float h = static_cast<float>(args[1].asNumber());
+            double rawW = args[0].asNumber();
+            double rawH = args[1].asNumber();
+            if (!std::isfinite(rawW) || !std::isfinite(rawH) || rawW <= 0.0 || rawH <= 0.0 ||
+                rawW > static_cast<double>(std::numeric_limits<float>::max()) ||
+                rawH > static_cast<double>(std::numeric_limits<float>::max())) {
+              throw JSError(rt, "init(width, height) requires positive finite dimensions within float range");
+            }
+            float w = static_cast<float>(rawW);
+            float h = static_cast<float>(rawH);
             state->game = std::shared_ptr<RustGame>(rust_game_create(w, h), rust_game_destroy);
             return Value::undefined();
           }));
@@ -96,9 +103,18 @@ void NativeRustModule::install(Runtime& runtime) {
           2,
           [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
             if (state->game && count >= 2 && args[0].isNumber() && args[1].isNumber()) {
-              float x = static_cast<float>(args[0].asNumber());
-              float tilt = static_cast<float>(args[1].asNumber());
-              rust_game_set_paddle(state->game.get(), x, tilt);
+              double rawX = args[0].asNumber();
+              double rawTilt = args[1].asNumber();
+              if (std::isfinite(rawX) && std::isfinite(rawTilt) &&
+                  rawX >= -static_cast<double>(std::numeric_limits<float>::max()) &&
+                  rawX <= static_cast<double>(std::numeric_limits<float>::max()) &&
+                  rawTilt >= -static_cast<double>(std::numeric_limits<float>::max()) &&
+                  rawTilt <= static_cast<double>(std::numeric_limits<float>::max())) {
+                rust_game_set_paddle(
+                    state->game.get(),
+                    static_cast<float>(rawX),
+                    static_cast<float>(rawTilt));
+              }
             }
             return Value::undefined();
           }));
@@ -113,8 +129,11 @@ void NativeRustModule::install(Runtime& runtime) {
           1,
           [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
             if (state->game && count >= 1 && args[0].isNumber()) {
-              float dt = static_cast<float>(args[0].asNumber());
-              rust_game_step(state->game.get(), dt);
+              double rawDt = args[0].asNumber();
+              if (std::isfinite(rawDt) && rawDt > 0.0 &&
+                  rawDt <= static_cast<double>(std::numeric_limits<float>::max())) {
+                rust_game_step(state->game.get(), static_cast<float>(rawDt));
+              }
             }
             return Value::undefined();
           }));
@@ -237,8 +256,11 @@ void NativeRustModule::install(Runtime& runtime) {
           1,
           [state](Runtime&, const Value&, const Value* args, std::size_t count) -> Value {
             if (state->game && count >= 1 && args[0].isNumber()) {
-              uint32_t lvl = static_cast<uint32_t>(args[0].asNumber());
-              rust_game_set_level(state->game.get(), lvl);
+              double rawLvl = args[0].asNumber();
+              if (std::isfinite(rawLvl) && rawLvl >= 1.0 &&
+                  rawLvl <= static_cast<double>(std::numeric_limits<uint32_t>::max())) {
+                rust_game_set_level(state->game.get(), static_cast<uint32_t>(rawLvl));
+              }
             }
             return Value::undefined();
           }));

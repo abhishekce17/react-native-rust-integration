@@ -215,12 +215,16 @@ impl RustGame {
     }
 
     pub fn launch(&mut self) {
-        if self.is_launched || self.state != GameState::ReadyToLaunch {
+        if self.is_launched || (self.state != GameState::ReadyToLaunch && self.state != GameState::LastLife) {
             return;
         }
 
         self.is_launched = true;
-        self.state = GameState::Active;
+        self.state = if self.lives == 1 {
+            GameState::LastLife
+        } else {
+            GameState::Active
+        };
         let initial_ball = Ball {
             id: 1,
             x: self.paddle.x + self.paddle.width * 0.5,
@@ -235,11 +239,7 @@ impl RustGame {
 
     pub fn reset_ball_on_paddle(&mut self) {
         self.is_launched = false;
-        self.state = if self.lives == 1 {
-            GameState::LastLife
-        } else {
-            GameState::ReadyToLaunch
-        };
+        self.state = GameState::ReadyToLaunch;
         let reset_ball = Ball {
             id: 1,
             x: self.paddle.x + self.paddle.width * 0.5,
@@ -282,14 +282,15 @@ impl RustGame {
     }
 
     pub fn set_level(&mut self, level: u32) {
-        self.level = level;
+        let safe_level = level.max(1);
+        self.level = safe_level;
         self.combo = 1.0;
         self.combo_decay_timer = 0.0;
         self.events = 0;
-        self.bricks = if level == 1 {
+        self.bricks = if safe_level == 1 {
             Self::generate_stage_bricks(self.width, 36.0)
         } else {
-            Self::generate_random_bricks(level, self.width, 36.0)
+            Self::generate_random_bricks(safe_level, self.width, 36.0)
         };
         self.active_powerups.clear();
         self.falling_powerups.clear();
@@ -303,7 +304,6 @@ impl RustGame {
 
     pub fn revive(&mut self) {
         self.lives = 1;
-        self.state = GameState::ReadyToLaunch;
         self.reset_ball_on_paddle();
     }
 
@@ -324,6 +324,9 @@ impl RustGame {
     }
 
     pub fn set_paddle(&mut self, x: f32, tilt: f32) {
+        if !x.is_finite() || !tilt.is_finite() {
+            return;
+        }
         let max_x = (self.width - self.paddle.width).max(0.0);
         self.paddle.x = x.clamp(0.0, max_x);
         self.paddle.tilt = tilt.clamp(-1.0, 1.0);
@@ -363,10 +366,13 @@ impl RustGame {
     }
 
     pub fn step(&mut self, dt: f32) {
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
         let clamped_dt = dt.clamp(0.001, 0.033);
 
         // 1. Ready state: sweep aim angle and anchor ball to paddle
-        if !self.is_launched && (self.state == GameState::ReadyToLaunch || self.state == GameState::LastLife) {
+        if !self.is_launched {
             self.aim_time += clamped_dt * 1.5;
             self.aim_angle = -PI / 2.0 + (self.aim_time.sin() * 0.4);
             if let Some(ball) = self.balls.first_mut() {
