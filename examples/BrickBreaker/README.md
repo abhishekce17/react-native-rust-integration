@@ -53,10 +53,10 @@ bind(runtime, api, "subtract", rust_subtract);
 | **C++ Header (`shared/`)** | **Shared** | `NativeRustModule.h` uses `#if __has_include` and forward declarations |
 | **C++ Implementation (`shared/`)** | **Shared** | `NativeRustModule.cpp` (generic binder, RAII string guard, `std::shared_ptr` state) |
 | **Rust Core (`rust-core/`)** | **Shared** | C ABI exports, `build.rs`, `cbindgen.toml`, `lib.rs` (Edition 2024) |
-| **Android Toolchain** | 🤖 **Android only** | `cargo-ndk` compiling to 4 target triples, linked via Android NDK CMake |
-| **iOS Toolchain** | 🍎 **iOS only** | `cargo build` compiling to 3 target triples, bundled via `lipo` into `RustCore.xcframework` |
-| **Android Registration** | 🤖 **Android only** | `OnLoad.cpp` (`cxxModuleProvider`) |
-| **iOS Registration** | 🍎 **iOS only** | `RustModuleProvider.mm` (`<RCTModuleProvider>`) in `package.json.codegenConfig.ios` |
+| **Android Toolchain** | <img src="https://cdn.simpleicons.org/android/3DDC84" width="16" height="16" alt="Android" align="center" /> **Android only** | `cargo-ndk` compiling to 4 target triples, linked via Android NDK CMake |
+| **iOS Toolchain** | <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="16" height="16" alt="Apple" align="center" /></picture> **iOS only** | `cargo build` compiling to 3 target triples, bundled via `lipo` into `RustCore.xcframework` |
+| **Android Registration** | <img src="https://cdn.simpleicons.org/android/3DDC84" width="16" height="16" alt="Android" align="center" /> **Android only** | `OnLoad.cpp` (`cxxModuleProvider`) |
+| **iOS Registration** | <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="16" height="16" alt="Apple" align="center" /></picture> **iOS only** | `RustModuleProvider.mm` (`<RCTModuleProvider>`) in `package.json.codegenConfig.ios` |
 
 ---
 
@@ -113,7 +113,7 @@ bind(runtime, api, "subtract", rust_subtract);
 
 ---
 
-### 🤖 Android Prerequisites
+### <img src="https://cdn.simpleicons.org/android/3DDC84" width="18" height="18" alt="Android" align="center" /> Android Prerequisites
 Install Android Studio, Android SDK, and Android NDK (through SDK Manager).
 Install `cargo-ndk`:
 ```bash
@@ -149,7 +149,7 @@ rustup target add aarch64-linux-android x86_64-linux-android armv7-linux-android
 
 ---
 
-### 🍎 iOS Prerequisites
+### <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="18" height="18" alt="Apple" align="center" /></picture> iOS Prerequisites
 * macOS with Xcode 26.0+ and Command Line Tools (`xcode-select --install`)
 * CocoaPods (`pod --version`)
 
@@ -415,7 +415,7 @@ pub unsafe extern "C" fn rust_data_destroy(data: *mut RustData) {
 
 ## 5. Building the Rust Library (OS-Specific)
 
-### 🤖 5.1 Android Build Script (`rust-core/build-android.sh`)
+### <img src="https://cdn.simpleicons.org/android/3DDC84" width="18" height="18" alt="Android" align="center" /> 5.1 Android Build Script (`rust-core/build-android.sh`)
 Create `rust-core/build-android.sh`:
 
 ```bash
@@ -452,7 +452,7 @@ Outputs static archives into:
 
 ---
 
-### 🍎 5.2 iOS Build Script (`rust-core/build-ios.sh`)
+### <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="18" height="18" alt="Apple" align="center" /></picture> 5.2 iOS Build Script (`rust-core/build-ios.sh`)
 Create `rust-core/build-ios.sh`:
 
 ```bash
@@ -1224,7 +1224,7 @@ export default RustModule;
 
 ## 10. Platform Native Build Integration (OS-Specific)
 
-### 🤖 10.1 Android: CMake & Gradle Setup
+### <img src="https://cdn.simpleicons.org/android/3DDC84" width="18" height="18" alt="Android" align="center" /> 10.1 Android: CMake & Gradle Setup
 
 #### `android/app/src/main/jni/CMakeLists.txt`:
 ```cmake
@@ -1344,7 +1344,7 @@ android.newDsl=false
 
 ---
 
-### 🍎 10.2 iOS: CocoaPods & Podspec Setup
+### <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="18" height="18" alt="Apple" align="center" /></picture> 10.2 iOS: CocoaPods & Podspec Setup
 
 #### `RustModule.podspec` (at project root):
 ```ruby
@@ -1453,7 +1453,7 @@ end
 
 ## 11. TurboModule Registration (OS-Specific)
 
-### 🤖 11.1 Android Registration (`OnLoad.cpp`)
+### <img src="https://cdn.simpleicons.org/android/3DDC84" width="18" height="18" alt="Android" align="center" /> 11.1 Android Registration (`OnLoad.cpp`)
 In `android/app/src/main/jni/OnLoad.cpp`, include `NativeRustModule.h` and add the provider branch inside `cxxModuleProvider`:
 
 ```cpp
@@ -1472,7 +1472,7 @@ std::shared_ptr<TurboModule> cxxModuleProvider(
 
 ---
 
-### 🍎 11.2 iOS Registration (`RustModuleProvider`)
+### <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="18" height="18" alt="Apple" align="center" /></picture> 11.2 iOS Registration (`RustModuleProvider`)
 Create `ios/BrickBreaker/RustModuleProvider.h` and `ios/BrickBreaker/RustModuleProvider.mm` (or `ios/<YourProjectName>/...`):
 
 #### `ios/BrickBreaker/RustModuleProvider.h`:
@@ -1519,7 +1519,7 @@ NS_ASSUME_NONNULL_END
 
 ## 12. Build and Run Commands
 
-### 🤖 Android
+### <img src="https://cdn.simpleicons.org/android/3DDC84" width="18" height="18" alt="Android" align="center" /> Android
 ```bash
 # 1. Build Rust static libraries
 cd rust-core && ./build-android.sh && cd ..
@@ -1528,7 +1528,7 @@ cd rust-core && ./build-android.sh && cd ..
 npx react-native run-android
 ```
 
-### 🍎 iOS
+### <picture><source media="(prefers-color-scheme: dark)" srcset="https://cdn.simpleicons.org/apple/white"><img src="https://cdn.simpleicons.org/apple/black" width="18" height="18" alt="Apple" align="center" /></picture> iOS
 ```bash
 # 1. Build Rust XCFramework
 cd rust-core && ./build-ios.sh && cd ..
