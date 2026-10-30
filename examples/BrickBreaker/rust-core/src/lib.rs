@@ -165,7 +165,9 @@ pub unsafe extern "C" fn rust_game_resume(game: *mut RustGame) {
     }
 }
 
-// ---------- Zero-Copy Slice / Buffer Getters ----------
+// ---------- Continuous Slice / Raw Buffer Getters ----------
+// Returns raw pointers to contiguous memory slices. The C++ JSI layer copies
+// these bytes into a JavaScript ArrayBuffer via std::memcpy for memory-safe transfer.
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_game_get_balls_data(

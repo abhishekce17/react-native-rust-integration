@@ -12,6 +12,10 @@ struct RustGame;
 
 namespace facebook::react {
 
+struct GameStateHolder {
+  std::shared_ptr<RustGame> game{nullptr};
+};
+
 class NativeRustModule
     : public NativeRustModuleCxxSpec<NativeRustModule> {
  public:
@@ -23,7 +27,10 @@ class NativeRustModule
   void install(jsi::Runtime& runtime);
 
  private:
-  std::shared_ptr<RustGame> game_{nullptr};
+  // std::shared_ptr ensures safe, lifetime-managed native game state that is
+  // captured by value in JSI HostFunctions, avoiding dangling [this] pointer
+  // crashes across JS reloads/Fast Refresh.
+  std::shared_ptr<GameStateHolder> state_;
 };
 
 } // namespace facebook::react

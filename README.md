@@ -1386,7 +1386,6 @@ android.newDsl=false
 ```
 > [!NOTE]
 > AGP 9.0+ deprecates legacy variant APIs (`applicationVariants`, `testVariants`). Setting `android.newDsl=false` and `android.builtInKotlin=false` ensures compatibility with React Native 0.88 build tooling and prevents configuration-time failures.
-```
 
 ---
 

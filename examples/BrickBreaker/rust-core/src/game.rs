@@ -32,7 +32,7 @@ pub struct RustGame {
     aim_time: f32,
     next_id: u32,
 
-    // Contiguous float buffers exported to JS for zero-copy JSI access
+    // Contiguous float buffers exported to C++ for fast JSI buffer copying
     balls_buffer: Vec<f32>,
     bricks_buffer: Vec<f32>,
     powerups_buffer: Vec<f32>,

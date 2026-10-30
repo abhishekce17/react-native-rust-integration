@@ -27,12 +27,16 @@ using jsi::Value;
 } // namespace
 
 NativeRustModule::NativeRustModule(std::shared_ptr<CallInvoker> jsInvoker)
-    : NativeRustModuleCxxSpec(std::move(jsInvoker)) {}
+    : NativeRustModuleCxxSpec(std::move(jsInvoker)),
+      state_(std::make_shared<GameStateHolder>()) {}
 
 NativeRustModule::~NativeRustModule() = default;
 
 void NativeRustModule::install(Runtime& runtime) {
   Object api(runtime);
+
+  // Copy shared state pointer once into local scope so every HostFunction lambda
+  auto state = state_;
 
   // Initialize or recreate native game state
   api.setProperty(
@@ -42,13 +46,13 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "init"),
           2,
-          [this](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
+          [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
             if (count < 2 || !args[0].isNumber() || !args[1].isNumber()) {
               throw JSError(rt, "init(width, height) expects 2 numbers");
             }
             float w = static_cast<float>(args[0].asNumber());
             float h = static_cast<float>(args[1].asNumber());
-            this->game_ = std::shared_ptr<RustGame>(rust_game_create(w, h), rust_game_destroy);
+            state->game = std::shared_ptr<RustGame>(rust_game_create(w, h), rust_game_destroy);
             return Value::undefined();
           }));
 
@@ -60,9 +64,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "reset"),
           0,
-          [this](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
-            if (this->game_) {
-              rust_game_reset(this->game_.get());
+          [state](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
+            if (state->game) {
+              rust_game_reset(state->game.get());
             }
             return Value::undefined();
           }));
@@ -75,9 +79,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "launch"),
           0,
-          [this](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
-            if (this->game_) {
-              rust_game_launch(this->game_.get());
+          [state](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
+            if (state->game) {
+              rust_game_launch(state->game.get());
             }
             return Value::undefined();
           }));
@@ -90,11 +94,11 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "setPaddle"),
           2,
-          [this](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
-            if (this->game_ && count >= 2 && args[0].isNumber() && args[1].isNumber()) {
+          [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
+            if (state->game && count >= 2 && args[0].isNumber() && args[1].isNumber()) {
               float x = static_cast<float>(args[0].asNumber());
               float tilt = static_cast<float>(args[1].asNumber());
-              rust_game_set_paddle(this->game_.get(), x, tilt);
+              rust_game_set_paddle(state->game.get(), x, tilt);
             }
             return Value::undefined();
           }));
@@ -107,10 +111,10 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "step"),
           1,
-          [this](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
-            if (this->game_ && count >= 1 && args[0].isNumber()) {
+          [state](Runtime& rt, const Value&, const Value* args, std::size_t count) -> Value {
+            if (state->game && count >= 1 && args[0].isNumber()) {
               float dt = static_cast<float>(args[0].asNumber());
-              rust_game_step(this->game_.get(), dt);
+              rust_game_step(state->game.get(), dt);
             }
             return Value::undefined();
           }));
@@ -123,9 +127,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getState"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(0);
-            return Value(static_cast<double>(rust_game_get_state(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(0);
+            return Value(static_cast<double>(rust_game_get_state(state->game.get())));
           }));
 
   api.setProperty(
@@ -135,9 +139,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getScore"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(0);
-            return Value(static_cast<double>(rust_game_get_score(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(0);
+            return Value(static_cast<double>(rust_game_get_score(state->game.get())));
           }));
 
   api.setProperty(
@@ -147,9 +151,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getLives"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(3);
-            return Value(static_cast<double>(rust_game_get_lives(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(3);
+            return Value(static_cast<double>(rust_game_get_lives(state->game.get())));
           }));
 
   api.setProperty(
@@ -159,9 +163,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getCombo"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(1.0);
-            return Value(static_cast<double>(rust_game_get_combo(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(1.0);
+            return Value(static_cast<double>(rust_game_get_combo(state->game.get())));
           }));
 
   api.setProperty(
@@ -171,9 +175,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getPaddleX"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(0.0);
-            return Value(static_cast<double>(rust_game_get_paddle_x(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(0.0);
+            return Value(static_cast<double>(rust_game_get_paddle_x(state->game.get())));
           }));
 
   api.setProperty(
@@ -183,9 +187,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getPaddleWidth"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(130.0);
-            return Value(static_cast<double>(rust_game_get_paddle_width(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(130.0);
+            return Value(static_cast<double>(rust_game_get_paddle_width(state->game.get())));
           }));
 
   api.setProperty(
@@ -195,9 +199,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getAimAngle"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(-1.57);
-            return Value(static_cast<double>(rust_game_get_aim_angle(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(-1.57);
+            return Value(static_cast<double>(rust_game_get_aim_angle(state->game.get())));
           }));
 
   api.setProperty(
@@ -207,9 +211,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getLevel"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(1.0);
-            return Value(static_cast<double>(rust_game_get_level(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(1.0);
+            return Value(static_cast<double>(rust_game_get_level(state->game.get())));
           }));
 
   api.setProperty(
@@ -219,9 +223,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getEvents"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value(0.0);
-            return Value(static_cast<double>(rust_game_get_events(this->game_.get())));
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value(0.0);
+            return Value(static_cast<double>(rust_game_get_events(state->game.get())));
           }));
 
   api.setProperty(
@@ -231,10 +235,10 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "setLevel"),
           1,
-          [this](Runtime&, const Value&, const Value* args, std::size_t count) -> Value {
-            if (this->game_ && count >= 1 && args[0].isNumber()) {
+          [state](Runtime&, const Value&, const Value* args, std::size_t count) -> Value {
+            if (state->game && count >= 1 && args[0].isNumber()) {
               uint32_t lvl = static_cast<uint32_t>(args[0].asNumber());
-              rust_game_set_level(this->game_.get(), lvl);
+              rust_game_set_level(state->game.get(), lvl);
             }
             return Value::undefined();
           }));
@@ -246,9 +250,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "nextLevel"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (this->game_) {
-              rust_game_next_level(this->game_.get());
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (state->game) {
+              rust_game_next_level(state->game.get());
             }
             return Value::undefined();
           }));
@@ -260,9 +264,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "revive"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (this->game_) {
-              rust_game_revive(this->game_.get());
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (state->game) {
+              rust_game_revive(state->game.get());
             }
             return Value::undefined();
           }));
@@ -274,9 +278,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "pause"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (this->game_) {
-              rust_game_pause(this->game_.get());
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (state->game) {
+              rust_game_pause(state->game.get());
             }
             return Value::undefined();
           }));
@@ -288,9 +292,9 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "resume"),
           0,
-          [this](Runtime&, const Value&, const Value*, std::size_t) -> Value {
-            if (this->game_) {
-              rust_game_resume(this->game_.get());
+          [state](Runtime&, const Value&, const Value*, std::size_t) -> Value {
+            if (state->game) {
+              rust_game_resume(state->game.get());
             }
             return Value::undefined();
           }));
@@ -302,7 +306,7 @@ void NativeRustModule::install(Runtime& runtime) {
   auto float32ArrayCtor = std::make_shared<Function>(
       runtime.global().getPropertyAsFunction(runtime, "Float32Array"));
 
-  // Zero-copy slice getters into Float32Array (using cached constructors)
+  // Fast slice getters into Float32Array (safe std::memcpy from Rust buffer into JS ArrayBuffer using cached constructors)
   api.setProperty(
       runtime,
       "getBalls",
@@ -310,10 +314,10 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getBalls"),
           0,
-          [this, arrayBufferCtor, float32ArrayCtor](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value::null();
+          [state, arrayBufferCtor, float32ArrayCtor](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value::null();
             uintptr_t length = 0;
-            const float* source = rust_game_get_balls_data(this->game_.get(), &length);
+            const float* source = rust_game_get_balls_data(state->game.get(), &length);
             if (!source || length == 0) return Value::null();
 
             const std::size_t byteCount = length * sizeof(float);
@@ -334,10 +338,10 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getBricks"),
           0,
-          [this, arrayBufferCtor, float32ArrayCtor](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value::null();
+          [state, arrayBufferCtor, float32ArrayCtor](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value::null();
             uintptr_t length = 0;
-            const float* source = rust_game_get_bricks_data(this->game_.get(), &length);
+            const float* source = rust_game_get_bricks_data(state->game.get(), &length);
             if (!source || length == 0) return Value::null();
 
             const std::size_t byteCount = length * sizeof(float);
@@ -358,10 +362,10 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getPowerUps"),
           0,
-          [this, arrayBufferCtor, float32ArrayCtor](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
-            if (!this->game_) return Value::null();
+          [state, arrayBufferCtor, float32ArrayCtor](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
+            if (!state->game) return Value::null();
             uintptr_t length = 0;
-            const float* source = rust_game_get_powerups_data(this->game_.get(), &length);
+            const float* source = rust_game_get_powerups_data(state->game.get(), &length);
             if (!source || length == 0) return Value::null();
 
             const std::size_t byteCount = length * sizeof(float);
