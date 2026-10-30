@@ -60,23 +60,56 @@ bind(runtime, api, "subtract", rust_subtract);
 
 ---
 
-## 2. Prerequisites & Target Setup
+## 2. Prerequisites & Compatibility Matrix
 
-### Common Tools (Both Platforms)
-* Node.js (>= 18 / 20 / 22) and package manager (`yarn`, `npm`, or `pnpm`)
+### Verified Compatibility Matrix (React Native 0.88.1)
+
+| Tool / Environment | RN 0.88.1 Requirement | Notes |
+| :--- | :--- | :--- |
+| **Node.js** | 22.13+ / 24.3+ / 26+ | Recommended LTS |
+| **JDK** | 17 | Java 17 LTS required by Gradle 9 |
+| **Gradle** | 9.4.1 | React Native 0.88 wrapper default |
+| **Xcode** | 26.0+ | Required by React Native 0.88.1 |
+| **iOS Deployment Target** | 15.1+ | Minimum deployment target |
+| **Android Min SDK** | 24 | Android 7.0 (Nougat) |
+| **Android Compile SDK** | 37 | Android SDK build target |
+| **Android Target SDK** | 36 | Android target API level |
+| **Rust Toolchain** | Rust 1.85+ | Required for `edition = "2024"` |
+
+> [!NOTE]
+> **Rust 2024 Edition Requirement:**
+> The `rust-core` library configuration specifies `edition = "2024"`. Rust 2024 edition requires a modern Rust toolchain (Rust 1.85.0 or newer). Update your toolchain via `rustup update` before compiling.
+
 * Rust installed via `rustup` (`rustc --version`, `cargo --version`)
-* A working **bare React Native** project (**React Native 0.79.x**, New Architecture enabled)
+* A working **bare React Native** project (**React Native 0.88.x**, New Architecture enabled)
 
-> **React Native Version Scope Note:**
-> The TurboModule bootstrap and native Codegen configuration in this guide are strictly scoped to **React Native 0.79.x**.
+> [!IMPORTANT]
+> **React Native Version Specificity & Codegen Schema Variance:**
 >
-> While the Rust C ABI and C++ generic JSI binder remain identical across React Native releases, native module registration and Codegen schemas differ across versions:
-> - **RN 0.79.x Flat Schema (Used in this guide):**
->   `"ios": { "modulesProvider": { "NativeRustModule": "RustModuleProvider" } }`
-> - **RN 0.80+ / Current Codegen Documentation (Nested Schema):**
->   `"ios": { "modules": { "NativeRustModule": { "className": "RustModuleProvider" } } }`
+> While the Rust C ABI and C++ generic JSI binder remain identical across React Native releases, native module registration schemas in `@react-native/codegen` differ strictly across versions:
 >
-> If you are targeting another release, inspect your installed `@react-native/codegen` package's schema and official documentation rather than assuming universal cross-version compatibility for the native registration files.
+> - **React Native 0.88.0+ (Modern Standard - Used in this project):**
+>   Requires the nested `modules` schema:
+>   ```json
+>   "ios": {
+>     "modules": {
+>       "NativeRustModule": {
+>         "className": "RustModuleProvider"
+>       }
+>     }
+>   }
+>   ```
+> - **React Native 0.79.x (Legacy Flat Schema):**
+>   Used the older flat `modulesProvider` mapping:
+>   ```json
+>   "ios": {
+>     "modulesProvider": {
+>       "NativeRustModule": "RustModuleProvider"
+>     }
+>   }
+>   ```
+>
+> **Compatibility Warning**: The flat `modulesProvider` schema is strictly **incompatible** with React Native 0.88+. In React Native 0.88+, `@react-native/codegen` enforces schema validation during `pod install`; providing the flat syntax will cause CocoaPods spec generation to throw schema validation errors. If targeting React Native 0.88+, you must use the nested `modules` block with `className`.
 
 ---
 
@@ -117,7 +150,7 @@ rustup target add aarch64-linux-android x86_64-linux-android armv7-linux-android
 ---
 
 ### 🍎 iOS Prerequisites
-* macOS with Xcode (15+ or 16+) and Command Line Tools (`xcode-select --install`)
+* macOS with Xcode 26.0+ and Command Line Tools (`xcode-select --install`)
 * CocoaPods (`pod --version`)
 
 Add the 3 iOS Rust target triples:
@@ -133,7 +166,7 @@ rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 ## 3. Project Directory Structure
 
 ```text
-MyReactNativeApp/
+BrickBreaker/                          # (Or <YourProjectName>/)
 ├── android/
 │   ├── gradle.properties
 │   └── app/
@@ -143,13 +176,14 @@ MyReactNativeApp/
 │           └── OnLoad.cpp             # [Android] Registers NativeRustModule
 ├── ios/
 │   ├── Podfile                        # [iOS] Links local RustModule pod
-│   └── GamePrototype/
+│   └── BrickBreaker/                  # (Or <YourProjectName>/)
 │       ├── RustModuleProvider.h       # [iOS] TurboModule provider interface
 │       └── RustModuleProvider.mm      # [iOS] Objective-C++ provider class
 ├── rust-core/
 │   ├── Cargo.toml                     # Rust 2024 edition, panic = "abort"
 │   ├── cbindgen.toml                  # C bindings config
 │   ├── build.rs                       # Auto-generates rust_core.h
+│   ├── build-android.sh               # [Android] Compiles target/ ABIs via cargo-ndk
 │   ├── build-ios.sh                   # [iOS] Packages target/RustCore.xcframework
 │   ├── include/                       # Auto-generated: rust_core.h
 │   └── src/
@@ -381,13 +415,35 @@ pub unsafe extern "C" fn rust_data_destroy(data: *mut RustData) {
 
 ## 5. Building the Rust Library (OS-Specific)
 
-### 🤖 5.1 Android Build (`cargo-ndk`)
-Run from project root:
+### 🤖 5.1 Android Build Script (`rust-core/build-android.sh`)
+Create `rust-core/build-android.sh`:
+
 ```bash
-cd rust-core
+#!/usr/bin/env bash
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+if ! command -v cargo-ndk &> /dev/null; then
+    echo "cargo-ndk not found in PATH. Install with: cargo install cargo-ndk"
+    exit 1
+fi
+
+echo "==> Building Rust static libraries for Android ABIs..."
 cargo ndk -t arm64-v8a -t x86_64 -t armeabi-v7a -t x86 build --release
-cd ..
+
+echo "==> Successfully compiled Android librust_core.a targets in rust-core/target/"
 ```
+
+Make it executable and run it:
+```bash
+chmod +x rust-core/build-android.sh
+./rust-core/build-android.sh
+```
+
 Outputs static archives into:
 * `rust-core/target/aarch64-linux-android/release/librust_core.a`
 * `rust-core/target/x86_64-linux-android/release/librust_core.a`
@@ -461,13 +517,15 @@ export default TurboModuleRegistry.getEnforcing<Spec>('NativeRustModule');
 
 Add `codegenConfig` with mappings for **both** Android and iOS:
 
+#### React Native 0.88+ (Modern Standard):
 ```json
 {
-  "name": "GamePrototype",
+  "name": "BrickBreaker",
   "version": "0.0.1",
   "scripts": {
-    "build:rust": "cd rust-core && ./build-ios.sh",
-    "ios": "npm run build:rust && react-native run-ios",
+    "build:rust:android": "cd rust-core && ./build-android.sh",
+    "build:rust:ios": "cd rust-core && ./build-ios.sh",
+    "ios": "npm run build:rust:ios && react-native run-ios",
     "android": "react-native run-android"
   },
   "codegenConfig": {
@@ -478,24 +536,40 @@ Add `codegenConfig` with mappings for **both** Android and iOS:
       "javaPackageName": "com.rustmodule.specs"
     },
     "ios": {
-      "modulesProvider": {
-        "NativeRustModule": "RustModuleProvider"
+      "modules": {
+        "NativeRustModule": {
+          "className": "RustModuleProvider"
+        }
       }
     }
   }
 }
 ```
 
+> [!WARNING]
 > **Codegen Schema Variance Across Releases:**
-> - **Flat `modulesProvider` (RN 0.79.x standard used here):**
+> - **React Native 0.88.0+ (Strict Requirement):**
+>   Modern `@react-native/codegen` strictly requires the nested `modules` block:
 >   ```json
->   "ios": { "modulesProvider": { "NativeRustModule": "RustModuleProvider" } }
+>   "ios": {
+>     "modules": {
+>       "NativeRustModule": {
+>         "className": "RustModuleProvider"
+>       }
+>     }
+>   }
 >   ```
-> - **Nested `modules` (RN 0.80+ / current Codegen docs):**
+> - **React Native 0.79.x (Legacy):**
+>   Earlier versions used the flat `modulesProvider` mapping:
 >   ```json
->   "ios": { "modules": { "NativeRustModule": { "className": "RustModuleProvider" } } }
+>   "ios": {
+>     "modulesProvider": {
+>       "NativeRustModule": "RustModuleProvider"
+>     }
+>   }
 >   ```
-> When building on versions other than 0.79.x, check which schema structure your installed version of `@react-native/codegen` expects.
+>
+> **Notice on Compatibility**: The flat `modulesProvider` schema is **completely incompatible with React Native 0.88+**. Running `pod install` with the flat syntax on RN 0.88+ causes CocoaPods Codegen validation to fail immediately. Always use the nested `modules` schema with `className` when on React Native 0.88+.
 
 ---
 
@@ -899,6 +973,264 @@ void NativeRustModule::install(Runtime& runtime) {
 } // namespace facebook::react
 ```
 
+> [!TIP]
+> **Performance Optimization for High-Frequency Render Loops (60/120 FPS): TypedArray Constructor Caching**
+>
+> In high-frequency game loops, physics simulations, particle engines, or audio synthesizers calling typed array getters (`getValues()`, `getBalls()`, `getBricks()`) 60 to 120 times every second, standard JSI reflection introduces unnecessary overhead:
+>
+> ```cpp
+> // UNOPTIMIZED PATTERN (DO NOT USE IN 60/120 FPS HOT LOOPS):
+> // Every frame, Hermes must:
+> // 1. Hash the strings "ArrayBuffer" and "Float32Array"
+> // 2. Perform a hash-table lookup on globalThis
+> // 3. Walk the prototype chain to resolve the constructor
+> // 4. Allocate a transient jsi::Function wrapper on the C++ stack
+> Object bufferObject = rt.global()
+>     .getPropertyAsFunction(rt, "ArrayBuffer")   // Lookup 1: String reflection
+>     .callAsConstructor(rt, static_cast<double>(byteCount))
+>     .asObject(rt);
+>
+> return rt.global()
+>     .getPropertyAsFunction(rt, "Float32Array")  // Lookup 2: String reflection
+>     .callAsConstructor(rt, bufferObject);
+> ```
+>
+> At 60 FPS across 3 buffer queries (`getBalls`, `getBricks`, `getPowerUps`), this executes **360 string lookups every second** (720 lookups/sec at 120 FPS).
+>
+> Below is the complete step-by-step production implementation to eliminate 100% of runtime string lookups by caching the constructor functions once at startup.
+>
+> ---
+>
+> ### Architecture Overview: Where and Why
+>
+> | Location | File | Purpose |
+> | :--- | :--- | :--- |
+> | **Initialization** | `shared/NativeRustModule.cpp` | Cache `ArrayBuffer` and `Float32Array` constructors once inside `install()` |
+> | **Hot Loop Lambda** | `shared/NativeRustModule.cpp` | Capture the cached constructors in the HostFunction closure (`getValues`, `getBalls`, etc.) |
+> | **Avoid Header Members** | `shared/NativeRustModule.h` | Do not store as class members (avoids UAF and runtime teardown crashes) |
+>
+> ---
+>
+> ### Step 1: Cache Constructor References Once during `install()`
+>
+> **Target File:** `shared/NativeRustModule.cpp`  
+> **Location:** Inside `NativeRustModule::install(Runtime& runtime)`, right before registering any typed array getter methods.
+>
+> ```cpp
+> // =============================================================================
+> // STEP 1: RESOLVE AND CACHE CONSTRUCTORS ONCE AT STARTUP
+> // =============================================================================
+> // Required headers:
+> //   #include <memory>        // For std::make_shared, std::shared_ptr
+> //   #include <jsi/jsi.h>     // For facebook::jsi::Function, Runtime, Object
+> //
+> // Why std::shared_ptr<jsi::Function>?
+> //   HostFunctions registered with JSI are C++ lambdas that outlive the install()
+> //   stack frame. Wrapping the jsi::Function in a std::shared_ptr allows multiple
+> //   HostFunction lambdas (e.g. getBalls, getBricks, getPowerUps) to share ownership
+> //   safely without lifetime races or dangling pointers when the JSI runtime shuts down.
+> // =============================================================================
+>
+> void NativeRustModule::install(Runtime& runtime) {
+>   Object api(runtime);
+>
+>   // 1. Resolve the global ArrayBuffer constructor once from the JavaScript global scope:
+>   auto arrayBufferCtor = std::make_shared<Function>(
+>       runtime.global().getPropertyAsFunction(runtime, "ArrayBuffer"));
+>
+>   // 2. Resolve the global Float32Array view constructor once from the JavaScript global scope:
+>   auto float32ArrayCtor = std::make_shared<Function>(
+>       runtime.global().getPropertyAsFunction(runtime, "Float32Array"));
+>
+>   // Constructors are now safely cached. Proceed to register methods below...
+> ```
+>
+> ---
+>
+> ### Step 2: Capture Cached Constructors in Your Buffer Getter HostFunctions
+>
+> **Target File:** `shared/NativeRustModule.cpp`  
+> **Location:** Inside the lambda of any method returning raw typed buffer data (e.g. `getValues`, `getBalls`, `getBricks`).
+>
+> ```cpp
+>   // =============================================================================
+>   // STEP 2: CAPTURE CACHED CONSTRUCTORS IN HOSTFUNCTION LAMBDA
+>   // =============================================================================
+>   // Notice the lambda capture list:
+>   //   [data = this->data_, arrayBufferCtor, float32ArrayCtor]
+>   //
+>   // Capturing by value increments the shared_ptr reference count. When the JS
+>   // garbage collector eventually disposes of the HostFunction during app reload,
+>   // the shared_ptr automatically releases the cached jsi::Function.
+>   // =============================================================================
+>   api.setProperty(
+>       runtime,
+>       "getValues",
+>       Function::createFromHostFunction(
+>           runtime,
+>           PropNameID::forAscii(runtime, "getValues"),
+>           0, // Parameter count: 0 arguments expected
+>           [data = this->data_, arrayBufferCtor, float32ArrayCtor](
+>               Runtime& rt, const Value& thisValue, const Value* args, std::size_t count) -> Value {
+>             // Guard check: ensure underlying Rust engine instance is valid
+>             if (!data) {
+>               return Value::null();
+>             }
+>             if (count != 0) {
+>               throw JSError(rt, "getValues() does not accept arguments");
+>             }
+>
+>             // -----------------------------------------------------------------
+>             // 1. QUERY RUST MEMORY SLICE VIA C-ABI FFI
+>             // -----------------------------------------------------------------
+>             // rust_data_values returns a const float* pointing directly into Rust
+>             // contiguous heap memory (e.g. Vec<f32>) and populates length.
+>             std::size_t length = 0;
+>             const float* source = rust_data_values(data.get(), &length);
+>             if (source == nullptr || length == 0) {
+>               return Value::null();
+>             }
+>
+>             // Total bytes to copy: float count * 4 bytes per IEEE 754 float
+>             const std::size_t byteCount = length * sizeof(float);
+>
+>             // -----------------------------------------------------------------
+>             // 2. ALLOCATE ARRAYBUFFER ON HERMES/V8 HEAP (ZERO STRING LOOKUPS)
+>             // -----------------------------------------------------------------
+>             // Instead of rt.global().getPropertyAsFunction(rt, "ArrayBuffer"),
+>             // invoke the pre-cached constructor directly:
+>             Object bufferObject = arrayBufferCtor
+>                 ->callAsConstructor(rt, static_cast<double>(byteCount))
+>                 .asObject(rt);
+>
+>             // -----------------------------------------------------------------
+>             // 3. COPY BYTES DIRECTLY INTO JSI MANAGED BUFFER
+>             // -----------------------------------------------------------------
+>             // getArrayBuffer(rt) gives direct access to the JS buffer memory.
+>             // std::memcpy performs a high-speed synchronous CPU memory block copy.
+>             ArrayBuffer buffer = bufferObject.getArrayBuffer(rt);
+>             std::memcpy(buffer.data(rt), source, byteCount);
+>
+>             // -----------------------------------------------------------------
+>             // 4. INSTANTIATE FLOAT32ARRAY VIEW DIRECTLY (ZERO STRING LOOKUPS)
+>             // -----------------------------------------------------------------
+>             // Wrap the ArrayBuffer in a Float32Array typed array view and return to JS:
+>             return float32ArrayCtor->callAsConstructor(rt, bufferObject);
+>           }));
+> ```
+>
+> ---
+>
+> ### Step 3: Why Storing Constructors as Class Members with `[this]` is an Anti-Pattern (UAF & Lifecycle Hazards)
+>
+> A common instinct when structuring C++ classes is to store cached constructor handles as class member variables:
+>
+> ```cpp
+> // DANGEROUS ANTI-PATTERN (DO NOT USE IN TURBOMODULES):
+> class NativeRustModule : public NativeRustModuleCxxSpec<NativeRustModule> {
+>  private:
+>   // Storing JSI constructor handles as module members:
+>   std::unique_ptr<facebook::jsi::Function> arrayBufferCtor_{nullptr};
+>   std::unique_ptr<facebook::jsi::Function> float32ArrayCtor_{nullptr};
+> };
+> ```
+> And capturing `[this]` inside HostFunction lambdas:
+> ```cpp
+> // DANGEROUS HOSTFUNCTION CLOSURE:
+> [this](Runtime& rt, const Value&, const Value*, std::size_t) -> Value {
+>   Object bufferObject = this->arrayBufferCtor_
+>       ->callAsConstructor(rt, static_cast<double>(byteCount))
+>       .asObject(rt);
+>   ArrayBuffer buffer = bufferObject.getArrayBuffer(rt);
+>   std::memcpy(buffer.data(rt), source, byteCount);
+>   return this->float32ArrayCtor_->callAsConstructor(rt, bufferObject);
+> }
+> ```
+>
+> > [!CAUTION]
+> > **Critical Safety Warning: Use-After-Free (UAF) and Runtime Crash Hazards**
+> >
+> > Storing `jsi::Function` as class members and capturing `[this]` introduces two severe memory and lifecycle hazards:
+> >
+> > 1. **Use-After-Free (Dangling `this` Pointer):**
+> >    In React Native, TurboModules are owned by the native C++ module registry, whereas registered HostFunctions are JavaScript function objects owned and retained by the JavaScript runtime (`globalThis`). A JavaScript HostFunction can easily outlive the C++ `NativeRustModule` instance (for example, during Fast Refresh, runtime reloads, bridge invalidation, or navigation state transitions). If JavaScript invokes the HostFunction after the C++ instance has been destructed, accessing `this->arrayBufferCtor_` dereferences a dangling pointer, leading to an immediate crash or heap corruption.
+> >
+> > 2. **JSI Runtime Invalidation Race (`SIGSEGV`):**
+> >    Every JSI handle (`jsi::Function`, `jsi::Object`, `jsi::Value`) is explicitly bound to a specific `jsi::Runtime` instance. If `NativeRustModule` holds `std::unique_ptr<jsi::Function>` members, their C++ destructors attempt to notify the runtime to clean up handles. If the `jsi::Runtime` is destroyed before the TurboModule C++ destructor executes, destructing `arrayBufferCtor_` calls into an already-freed `Runtime`, causing a fatal segmentation fault (`SIGSEGV`).
+> >
+> > **The Safe Architecture (Step 1 & Step 2):**
+> > Always use the closure-based shared pointer pattern demonstrated in Steps 1 and 2:
+> > ```cpp
+> > [data = this->data_, arrayBufferCtor, float32ArrayCtor](Runtime& rt, ...) -> Value
+> > ```
+> > Capturing `std::shared_ptr<jsi::Function>` by value directly into the HostFunction closure binds the constructors' lifetime directly to the HostFunction inside the JavaScript engine. When the runtime shuts down or when JavaScript garbage collects the HostFunction, the closure and its captured constructors are safely destroyed within the valid lifecycle of the runtime, preventing both UAF and runtime teardown crashes.
+>
+> ---
+>
+> ### High-Frequency Performance Best Practice: Event-Driven Bitmask Polling
+>
+> While caching typed array constructors eliminates string reflection overhead, polling large entity buffers (e.g., 20–50 game entities or world layout blocks) on every 60/120 FPS frame still causes JavaScript heap churn when converting native buffer floats into UI objects.
+>
+> **The Solution: Pair JSI TypedArrays with a Read-and-Clear Event Bitmask**
+>
+> #### 1. Rust Bitmask Definition & Read-and-Clear Lifecycle Contract:
+> In Rust (`rust-core/src/game.rs` / `rust-core/src/lib.rs`), define bit flags and implement a **Read-and-Clear contract** inside `get_events()`:
+> ```rust
+> pub const EVENT_NONE: u32 = 0;
+> pub const EVENT_PADDLE_HIT: u32 = 1 << 0;
+> pub const EVENT_BRICK_HIT: u32 = 1 << 1;
+> pub const EVENT_BRICK_DESTROY: u32 = 1 << 2;
+> pub const EVENT_LAYOUT_CHANGED: u32 = 1 << 3;
+>
+> // Lifecycle Contract: Reads and clears the flags under exclusive mutable access (&mut self)
+> // so events trigger exactly once per frame.
+> // Note: If events can be written from another thread (e.g. background worker or audio thread),
+> // use thread-safe synchronization such as std::sync::atomic::AtomicU32::swap(0, Ordering::AcqRel).
+> pub fn get_events(&mut self) -> u32 {
+>     let current_events = self.events;
+>     self.events = EVENT_NONE; // Cleared on read under exclusive mutable access
+>     current_events
+> }
+> ```
+>
+> > [!NOTE]
+> > **Integration Scope Note:**
+> > The event bitmask pattern requires its own C ABI export (`rust_game_get_events`), C++ JSI binding (`api.setProperty(runtime, "getEvents", ...)`), and TypeScript API declaration. These additions are domain-specific optimizations demonstrated in the `BrickBreaker` project (`rust-core/src/game.rs`, `shared/NativeRustModule.cpp`, `src/RustModule.ts`) and are not part of the basic generic `RustModule` bridge illustrated earlier in Sections 4 through 8.
+>
+> #### 2. TypeScript Constants Mapping:
+> In TypeScript (`src/RustModule.ts`), mirror the Rust bitmask values:
+> ```ts
+> export const RUST_EVENT = {
+>   PADDLE_HIT: 1 << 0,
+>   BRICK_HIT: 1 << 1,
+>   BRICK_DESTROY: 1 << 2,
+>   LAYOUT_CHANGED: 1 << 3,
+> } as const;
+> ```
+>
+> #### 3. Event-Driven Buffer Invalidation in Render Loop:
+> In the React / TypeScript render loop (`useGamePhysics.ts`), read the bitmask once per frame and only query the typed array buffer when mutation flags are set or on initial load:
+> ```ts
+> const events = engine.getEvents(); // Returns accumulated flags and clears native register
+> const hasMutation = (events & (RUST_EVENT.BRICK_HIT | RUST_EVENT.BRICK_DESTROY | RUST_EVENT.LAYOUT_CHANGED)) !== 0;
+>
+> if (hasMutation || !initialLayoutLoaded) {
+>   initialLayoutLoaded = true;
+>   const bricksData = engine.getBricks(); // TypedArray getter called conditionally
+>   // Parse buffer into state only when state actually changed
+> }
+> ```
+> This prevents persistent flags from causing repeated polling on subsequent frames and eliminates redundant object allocations during high-frequency simulation loops.
+>
+> ---
+>
+> ### Verification & Performance Guarantees
+>
+> | Metric | Unoptimized Reflection | Cached Constructor Pattern |
+> | :--- | :--- | :--- |
+> | **String Hashing Lookups** | 360 to 720 lookups / sec | **0 lookups / sec (100% eliminated)** |
+> | **Memory Ownership** | JS owns ArrayBuffer | **JS owns ArrayBuffer** (no shared raw pointers across threads) |
+
 ---
 
 ## 9. Unified TypeScript Wrapper — `src/RustModule.ts`
@@ -973,8 +1305,10 @@ set(RUST_CORE_ARCHIVE
     "${CMAKE_CURRENT_LIST_DIR}/../../../../../rust-core/target/${RUST_TARGET}/release/librust_core.a"
 )
 
+# Note: Use WARNING rather than FATAL_ERROR so preliminary CMake evaluation passes during
+# initial Gradle sync on a fresh checkout before the buildRust task has executed.
 if(NOT EXISTS "${RUST_CORE_ARCHIVE}")
-    message(FATAL_ERROR "Rust archive not found: ${RUST_CORE_ARCHIVE}")
+    message(WARNING "Rust archive not found at: ${RUST_CORE_ARCHIVE}. Ensure cargo ndk build has run.")
 endif()
 
 add_library(rust_core STATIC IMPORTED GLOBAL)
@@ -1007,6 +1341,16 @@ tasks.register("buildRust", Exec) {
     description = "Compiles the Rust static library via cargo-ndk"
     workingDir file("${rootDir}/../rust-core")
 
+    // Cross-platform Cargo & NDK environment injection (Windows, macOS, Linux):
+    def userHome = System.getProperty("user.home") ?: System.getenv("HOME") ?: System.getenv("USERPROFILE")
+    def cargoBin = new File(userHome, ".cargo/bin").absolutePath
+    def currentPath = System.getenv("PATH") ?: ""
+    environment "PATH", "${cargoBin}${File.pathSeparator}${currentPath}"
+    if (android.hasProperty("ndkDirectory") && android.ndkDirectory != null) {
+        environment "ANDROID_NDK_HOME", android.ndkDirectory.absolutePath
+        environment "NDK_HOME", android.ndkDirectory.absolutePath
+    }
+
     def cargoArgs = ["cargo", "ndk"]
     targetArchitectures.each { arch ->
         def trimmed = arch.trim()
@@ -1031,6 +1375,17 @@ tasks.configureEach { task ->
 }
 
 preBuild.dependsOn("buildRust")
+```
+
+#### `android/gradle.properties`:
+Add the following flags to ensure compatibility with modern Android Gradle Plugin (AGP 9+):
+```properties
+# Opt out of built-in Kotlin and new DSL behavior in AGP 9.x to preserve React Native variant APIs:
+android.builtInKotlin=false
+android.newDsl=false
+```
+> [!NOTE]
+> AGP 9.0+ deprecates legacy variant APIs (`applicationVariants`, `testVariants`). Setting `android.newDsl=false` and `android.builtInKotlin=false` ensures compatibility with React Native 0.88 build tooling and prevents configuration-time failures.
 ```
 
 ---
@@ -1091,7 +1446,7 @@ if linkage != nil
   use_frameworks! :linkage => linkage.to_sym
 end
 
-target 'GamePrototype' do
+target 'BrickBreaker' do # Replace 'BrickBreaker' with your iOS target name (<YourProjectName>)
   config = use_native_modules!
 
   # Include the Rust C++ TurboModule local pod
@@ -1109,28 +1464,32 @@ target 'GamePrototype' do
       :mac_catalyst_enabled => false
     )
 
-    # Automatically ensure RustModuleProvider.mm is in Xcode's GamePrototype compile sources
+    # Automatically ensure RustModuleProvider.mm is in Xcode's BrickBreaker compile sources
+    # (Replace 'BrickBreaker' with your Xcode project/target name: <YourProjectName>)
     require 'xcodeproj'
-    project_path = "#{Pod::Config.instance.installation_root}/GamePrototype.xcodeproj"
+    project_path = "#{Pod::Config.instance.installation_root}/BrickBreaker.xcodeproj"
     project = Xcodeproj::Project.open(project_path)
-    target = project.targets.find { |t| t.name == 'GamePrototype' }
-    group = project.main_group.find_subpath('GamePrototype')
+    target = project.targets.find { |t| t.name == 'BrickBreaker' }
+    group = project.main_group.find_subpath('BrickBreaker')
 
-    source_files = ['RustModuleProvider.h', 'RustModuleProvider.mm']
-    changed = false
+    if target && group
+      source_files = ['RustModuleProvider.h', 'RustModuleProvider.mm']
+      changed = false
 
-    source_files.each do |file_name|
-      rel_path = "GamePrototype/#{file_name}"
-      file_ref = group.find_file_by_path(rel_path) || group.new_file(rel_path)
-      if file_name.end_with?('.mm') && !target.source_build_phase.files_references.include?(file_ref)
-        target.add_file_references([file_ref])
-        changed = true
+      source_files.each do |file_name|
+        file_ref = group.find_file_by_path(file_name) || group.new_file(file_name)
+        if file_name.end_with?('.mm') && !target.source_build_phase.files_references.include?(file_ref)
+          target.add_file_references([file_ref])
+          changed = true
+        end
       end
-    end
 
-    if changed
-      project.save
-      Pod::UI.puts "[RustModule] Automatically added RustModuleProvider.mm to Xcode GamePrototype target".green
+      if changed
+        project.save
+        Pod::UI.puts "[RustModule] Automatically added RustModuleProvider.mm to Xcode BrickBreaker target".green
+      end
+    else
+      Pod::UI.warn "[RustModule] Could not locate BrickBreaker target or group in #{project_path}"
     end
   end
 end
@@ -1160,9 +1519,9 @@ std::shared_ptr<TurboModule> cxxModuleProvider(
 ---
 
 ### 🍎 11.2 iOS Registration (`RustModuleProvider`)
-Create `ios/GamePrototype/RustModuleProvider.h` and `ios/GamePrototype/RustModuleProvider.mm`:
+Create `ios/BrickBreaker/RustModuleProvider.h` and `ios/BrickBreaker/RustModuleProvider.mm` (or `ios/<YourProjectName>/...`):
 
-#### `ios/GamePrototype/RustModuleProvider.h`:
+#### `ios/BrickBreaker/RustModuleProvider.h`:
 ```objc
 #import <Foundation/Foundation.h>
 #import <ReactCommon/RCTTurboModule.h>
@@ -1175,7 +1534,7 @@ NS_ASSUME_NONNULL_BEGIN
 NS_ASSUME_NONNULL_END
 ```
 
-#### `ios/GamePrototype/RustModuleProvider.mm`:
+#### `ios/BrickBreaker/RustModuleProvider.mm`:
 ```objc
 #import "RustModuleProvider.h"
 #import <ReactCommon/CallInvoker.h>
@@ -1208,10 +1567,10 @@ NS_ASSUME_NONNULL_END
 
 ### 🤖 Android
 ```bash
-# 1. Build Rust
-cd rust-core && cargo ndk -t arm64-v8a -t x86_64 -t armeabi-v7a -t x86 build --release && cd ..
+# 1. Build Rust static libraries
+cd rust-core && ./build-android.sh && cd ..
 
-# 2. Run Android app
+# 2. Run Android app (or let Gradle's buildRust task compile automatically)
 npx react-native run-android
 ```
 
@@ -1226,6 +1585,29 @@ cd ios && pod install && cd ..
 # 3. Run iOS app
 npx react-native run-ios --simulator "iPhone 16"
 ```
+
+> [!NOTE]
+> **Troubleshooting: DerivedData Permission Error (NSCocoaErrorDomain Code 513)**
+> If you encounter:
+> ```text
+> Error Domain=NSCocoaErrorDomain Code=513 "You don't have permission to save the file 'DerivedData' in the folder 'Xcode'."
+> ```
+> This occurs when executing in sandboxed developer environments, CI/CD runners, or restricted user accounts where write permissions to the global directory `~/Library/Developer/Xcode/DerivedData` are prohibited.
+>
+> **Mitigation**:
+> Redirect DerivedData into a local directory inside the workspace using the `-derivedDataPath` flag:
+> ```bash
+> xcodebuild -workspace ios/BrickBreaker.xcworkspace \
+>   -scheme BrickBreaker \
+>   -configuration Debug \
+>   -destination 'platform=iOS Simulator,name=iPhone 16' \
+>   -derivedDataPath ./build/DerivedData build
+> ```
+> You can then install and launch the compiled bundle on the booted simulator without needing global filesystem permissions:
+> ```bash
+> xcrun simctl install booted ./build/DerivedData/Build/Products/Debug-iphonesimulator/BrickBreaker.app
+> xcrun simctl launch booted org.reactjs.native.example.BrickBreaker
+> ```
 
 ---
 

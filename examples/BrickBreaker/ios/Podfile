@@ -17,6 +17,9 @@ end
 target 'BrickBreaker' do
   config = use_native_modules!
 
+  # Include the Rust C++ TurboModule local pod
+  pod 'RustModule', :path => '../'
+
   use_react_native!(
     :path => config[:reactNativePath],
     # An absolute path to your application root.
@@ -30,5 +33,32 @@ target 'BrickBreaker' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    # Automatically ensure RustModuleProvider.mm is in Xcode's BrickBreaker compile sources
+    require 'xcodeproj'
+    project_path = "#{Pod::Config.instance.installation_root}/BrickBreaker.xcodeproj"
+    project = Xcodeproj::Project.open(project_path)
+    target = project.targets.find { |t| t.name == 'BrickBreaker' }
+    group = project.main_group.find_subpath('BrickBreaker')
+
+    if target && group
+      source_files = ['RustModuleProvider.h', 'RustModuleProvider.mm']
+      changed = false
+
+      source_files.each do |file_name|
+        file_ref = group.find_file_by_path(file_name) || group.new_file(file_name)
+        if file_name.end_with?('.mm') && !target.source_build_phase.files_references.include?(file_ref)
+          target.add_file_references([file_ref])
+          changed = true
+        end
+      end
+
+      if changed
+        project.save
+        Pod::UI.puts "[RustModule] Automatically added RustModuleProvider.mm to Xcode BrickBreaker target".green
+      end
+    else
+      Pod::UI.warn "[RustModule] Could not locate BrickBreaker target or group in #{project_path}"
+    end
   end
 end

@@ -1,0 +1,25 @@
+[package]
+name = "rust-core"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[lib]
+name = "rust_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+rand = "0.8.8"
+
+[build-dependencies]
+cbindgen = "0.29.4"
+
+# Enforce panic = "abort" across all profiles to prevent unwinding across the C ABI
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = 3
