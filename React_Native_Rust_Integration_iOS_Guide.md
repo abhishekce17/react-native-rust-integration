@@ -862,8 +862,11 @@ void NativeRustModule::install(Runtime& runtime) {
     }
   }
 
-  // Capture shared_ptr by value so HostFunction owns a strong reference to data,
-  // making it completely independent of NativeRustModule's lifetime across Fast Refresh/reload.
+  // Hoist shared_ptr copy to local scope once. All HostFunction closures capture
+  // 'data' by value, making them completely independent of NativeRustModule's
+  // lifetime across Fast Refresh/reload and eliminating the 'this' keyword entirely.
+  auto data = data_;
+
   api.setProperty(
       runtime,
       "setValue",
@@ -871,8 +874,8 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "setValue"),
           2,
-          [data = this->data_](Runtime& rt, const Value&, const Value* args,
-                               std::size_t count) -> Value {
+          [data](Runtime& rt, const Value&, const Value* args,
+                 std::size_t count) -> Value {
             if (!data) {
               throw JSError(rt, "Native data instance is null");
             }
@@ -914,7 +917,7 @@ void NativeRustModule::install(Runtime& runtime) {
             return Value(success);
           }));
 
-  // Stateful getter (copies Rust memory into JS Float32Array):
+  // Stateful getter: copies Rust memory into JS Float32Array (Safe synchronous copy between allocators):
   api.setProperty(
       runtime,
       "getValues",
@@ -922,8 +925,8 @@ void NativeRustModule::install(Runtime& runtime) {
           runtime,
           PropNameID::forAscii(runtime, "getValues"),
           0,
-          [data = this->data_](Runtime& rt, const Value&, const Value*,
-                               std::size_t count) -> Value {
+          [data](Runtime& rt, const Value&, const Value*,
+                 std::size_t count) -> Value {
             if (!data) {
               return Value::null();
             }
@@ -957,6 +960,9 @@ void NativeRustModule::install(Runtime& runtime) {
 
 } // namespace facebook::react
 ```
+
+> [!NOTE]
+> For advanced high-frequency simulation patterns demonstrating dynamic re-initialization via the `GameStateHolder` pattern, read-and-clear event bitmask polling, and live entity streaming, see Section 14 in the unified [README.md](README.md#14-reference-application-case-study--brickbreaker-high-performance-game-engine) and the `examples/BrickBreaker` reference application.
 
 ### Supported Types & Precision Limit
 
